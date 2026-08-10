@@ -1,0 +1,23 @@
+.build/
+build/
+
+# Local packaging and visual verification artifacts.
+/dist/
+/tmp/
+/console.png
+/history-panel*.png
+/settings-*.png
+/.worktrees/
+/docs/
+/.idea/
+
+# Local operating-system, environment, and diagnostic files.
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.pem
+*.p12
+*.pfx
+*.key
