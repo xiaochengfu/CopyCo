@@ -247,6 +247,147 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.items().first?.contentFingerprint?.count, 64)
     }
 
+    func testInsertingSemanticTextDuplicateReusesOriginalRecordAndStoresLatestRepresentations() throws {
+        let rootURL = try makeTemporaryDirectory()
+        let store = HistoryStore(rootURL: rootURL)
+        let originalID = UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!
+        let original = try makeCapturedTextItem(
+            id: originalID,
+            createdAt: Date(timeIntervalSince1970: 1),
+            text: "same text",
+            sourceBundleID: "com.example.original",
+            sourceName: "Original"
+        )
+        let other = try makeCapturedTextItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000000B")!,
+            createdAt: Date(timeIntervalSince1970: 2),
+            text: "other text",
+            sourceBundleID: "com.example.other",
+            sourceName: "Other"
+        )
+        try store.insert(original)
+        try store.insert(other)
+        try store.setPinned(id: originalID, pinned: true)
+        let supersededPayloadURLs = try XCTUnwrap(
+            store.items().first(where: { $0.id == originalID })
+        ).representations.map { $0.payloadURL(relativeTo: rootURL) }
+
+        let latest = try makeCapturedTextItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000000C")!,
+            createdAt: Date(timeIntervalSince1970: 3),
+            text: "same text",
+            html: "<b>same text</b>",
+            sourceBundleID: "com.example.latest",
+            sourceName: "Latest"
+        )
+        XCTAssertNotEqual(original.contentFingerprint, latest.contentFingerprint)
+        XCTAssertEqual(original.contentIdentity, latest.contentIdentity)
+
+        try store.insert(latest)
+
+        let promoted = try XCTUnwrap(store.items().first(where: { $0.id == originalID }))
+        XCTAssertEqual(store.items().count, 2)
+        XCTAssertEqual(promoted.createdAt, latest.createdAt)
+        XCTAssertEqual(promoted.sourceBundleID, "com.example.latest")
+        XCTAssertEqual(promoted.sourceName, "Latest")
+        XCTAssertTrue(promoted.isPinned)
+        XCTAssertEqual(promoted.representations.map(\.uti), ["public.utf8-plain-text", "public.html"])
+        XCTAssertEqual(promoted.representations.map(\.itemIndex), [0, 0])
+        XCTAssertEqual(promoted.totalBytes, Data("same text".utf8).count + Data("<b>same text</b>".utf8).count)
+        XCTAssertEqual(
+            try promoted.representations.map { try Data(contentsOf: $0.payloadURL(relativeTo: rootURL)) },
+            [Data("same text".utf8), Data("<b>same text</b>".utf8)]
+        )
+        XCTAssertTrue(supersededPayloadURLs.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        XCTAssertEqual(try payloadFileCount(in: rootURL), 3)
+    }
+
+    func testInsertingSemanticTextDuplicateDerivesIdentityForLegacyIndexEntry() throws {
+        let rootURL = try makeTemporaryDirectory()
+        let originalID = UUID(uuidString: "00000000-0000-0000-0000-00000000001A")!
+        let original = try makeCapturedTextItem(
+            id: originalID,
+            createdAt: Date(timeIntervalSince1970: 1),
+            text: "legacy text",
+            sourceName: "Original"
+        )
+        let writer = HistoryStore(rootURL: rootURL)
+        try writer.insert(original)
+        let other = try makeCapturedTextItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000019")!,
+            createdAt: Date(timeIntervalSince1970: 1.5),
+            text: "other legacy text",
+            sourceName: "Other"
+        )
+        try writer.insert(other)
+
+        let indexURL = rootURL.appendingPathComponent("index.json")
+        var index = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [[String: Any]]
+        )
+        let originalIndex = try XCTUnwrap(index.firstIndex { $0["id"] as? String == originalID.uuidString })
+        XCTAssertNotNil(index[originalIndex]["contentIdentity"])
+        index[originalIndex].removeValue(forKey: "contentIdentity")
+        try JSONSerialization.data(withJSONObject: index).write(to: indexURL)
+
+        let store = HistoryStore(rootURL: rootURL)
+        try store.load()
+        let latest = try makeCapturedTextItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000001B")!,
+            createdAt: Date(timeIntervalSince1970: 2),
+            text: "legacy text",
+            html: "<i>legacy text</i>",
+            sourceName: "Latest Legacy Source"
+        )
+        XCTAssertNotEqual(original.contentFingerprint, latest.contentFingerprint)
+
+        try store.insert(latest)
+
+        let promoted = try XCTUnwrap(store.items().first(where: { $0.id == originalID }))
+        XCTAssertEqual(store.items().count, 2)
+        XCTAssertEqual(promoted.id, originalID)
+        XCTAssertEqual(promoted.createdAt, latest.createdAt)
+        XCTAssertEqual(promoted.sourceName, "Latest Legacy Source")
+        XCTAssertEqual(promoted.contentIdentity, latest.contentIdentity)
+        XCTAssertEqual(promoted.representations.map(\.uti), ["public.utf8-plain-text", "public.html"])
+    }
+
+    func testSemanticPromotionCleansNewPayloadAndIndexTemporaryFilesWhenIndexWriteFails() throws {
+        let rootURL = try makeTemporaryDirectory()
+        let store = HistoryStore(rootURL: rootURL)
+        let originalID = UUID(uuidString: "00000000-0000-0000-0000-00000000002A")!
+        let original = try makeCapturedTextItem(
+            id: originalID,
+            createdAt: Date(timeIntervalSince1970: 1),
+            text: "same text",
+            sourceName: "Original"
+        )
+        try store.insert(original)
+        let storedOriginal = try XCTUnwrap(store.items().first)
+        let originalPayloadURLs = storedOriginal.representations.map { $0.payloadURL(relativeTo: rootURL) }
+        let indexURL = rootURL.appendingPathComponent("index.json")
+        let originalIndexData = try Data(contentsOf: indexURL)
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: indexURL.path)
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: indexURL.path)
+        }
+        let latest = try makeCapturedTextItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000002B")!,
+            createdAt: Date(timeIntervalSince1970: 2),
+            text: "same text",
+            html: "<strong>same text</strong>",
+            sourceName: "Latest"
+        )
+
+        XCTAssertThrowsError(try store.insert(latest))
+
+        XCTAssertEqual(try Data(contentsOf: indexURL), originalIndexData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rootURL.appendingPathComponent("index.json.tmp").path))
+        XCTAssertTrue(originalPayloadURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        XCTAssertEqual(try payloadFileCount(in: rootURL), 1)
+        XCTAssertEqual(store.items().first?.representations.map(\.uti), ["public.utf8-plain-text"])
+    }
+
     func testPinnedItemsSortBeforeUnpinnedItemsAndPersistAcrossReload() throws {
         let rootURL = try makeTemporaryDirectory()
         let store = HistoryStore(rootURL: rootURL)
@@ -454,6 +595,44 @@ final class HistoryStoreTests: XCTestCase {
                 )
             ],
             totalBytes: payload.count
+        )
+    }
+
+    private func makeCapturedTextItem(
+        id: UUID,
+        createdAt: Date,
+        text: String,
+        html: String? = nil,
+        sourceBundleID: String? = "com.example.tests",
+        sourceName: String? = "Tests"
+    ) throws -> ClipboardItem {
+        var input = [
+            PasteboardCapture.Representation(
+                uti: "public.utf8-plain-text",
+                data: Data(text.utf8),
+                itemIndex: 0
+            )
+        ]
+        if let html {
+            input.append(.init(uti: "public.html", data: Data(html.utf8), itemIndex: 0))
+        }
+        let captured = try XCTUnwrap(PasteboardCapture.extract(
+            representations: input,
+            sourceBundleID: sourceBundleID,
+            sourceName: sourceName
+        ).item)
+        return ClipboardItem(
+            id: id,
+            createdAt: createdAt,
+            kind: captured.kind,
+            preview: captured.preview,
+            sourceBundleID: captured.sourceBundleID,
+            sourceName: captured.sourceName,
+            contentFingerprint: captured.contentFingerprint,
+            contentIdentity: captured.contentIdentity,
+            representations: captured.representations,
+            totalBytes: captured.totalBytes,
+            fullText: captured.fullText
         )
     }
 

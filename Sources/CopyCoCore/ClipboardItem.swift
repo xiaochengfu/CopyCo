@@ -23,6 +23,7 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
     public let sourceBundleID: String?
     public let sourceName: String?
     public let contentFingerprint: String?
+    public let contentIdentity: String?
     public var isPinned: Bool
     public var representations: [StoredRepresentation]
     public var totalBytes: Int
@@ -35,6 +36,7 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
         sourceBundleID: String? = nil,
         sourceName: String? = nil,
         contentFingerprint: String? = nil,
+        contentIdentity: String? = nil,
         isPinned: Bool = false,
         representations: [StoredRepresentation],
         totalBytes: Int,
@@ -47,6 +49,7 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
         self.sourceBundleID = sourceBundleID
         self.sourceName = sourceName
         self.contentFingerprint = contentFingerprint
+        self.contentIdentity = contentIdentity
         self.isPinned = isPinned
         self.representations = representations
         self.totalBytes = totalBytes
@@ -62,6 +65,7 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
         case sourceBundleID
         case sourceName
         case contentFingerprint
+        case contentIdentity
         case isPinned
         case representations
         case totalBytes
@@ -77,6 +81,7 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
         sourceBundleID = try container.decodeIfPresent(String.self, forKey: .sourceBundleID)
         sourceName = try container.decodeIfPresent(String.self, forKey: .sourceName)
         contentFingerprint = try container.decodeIfPresent(String.self, forKey: .contentFingerprint)
+        contentIdentity = try container.decodeIfPresent(String.self, forKey: .contentIdentity)
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         representations = try container.decode([StoredRepresentation].self, forKey: .representations)
         totalBytes = try container.decode(Int.self, forKey: .totalBytes)
@@ -92,6 +97,7 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
         try container.encode(sourceBundleID, forKey: .sourceBundleID)
         try container.encode(sourceName, forKey: .sourceName)
         try container.encodeIfPresent(contentFingerprint, forKey: .contentFingerprint)
+        try container.encodeIfPresent(contentIdentity, forKey: .contentIdentity)
         try container.encode(isPinned, forKey: .isPinned)
         try container.encode(representations, forKey: .representations)
         try container.encode(totalBytes, forKey: .totalBytes)

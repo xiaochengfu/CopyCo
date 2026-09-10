@@ -166,6 +166,20 @@ public final class PasteboardCapture: @unchecked Sendable {
         sourceBundleID: String? = nil,
         sourceName: String? = nil
     ) -> Extraction {
+        extract(
+            representations: representations,
+            originalItemIndices: Set(representations.map(\.itemIndex)),
+            sourceBundleID: sourceBundleID,
+            sourceName: sourceName
+        )
+    }
+
+    private static func extract(
+        representations: [Representation],
+        originalItemIndices: Set<Int>,
+        sourceBundleID: String?,
+        sourceName: String?
+    ) -> Extraction {
         let supported = orderedSupportedRepresentations(from: representations)
         guard !supported.isEmpty else {
             return Extraction(item: nil, fingerprint: nil, rejection: .noSupportedRepresentations)
@@ -179,7 +193,13 @@ public final class PasteboardCapture: @unchecked Sendable {
             return Extraction(item: nil, fingerprint: nil, rejection: .payloadExceedsInlineLimit)
         }
 
-        let fingerprint = fingerprint(for: supported)
+        let fingerprintRepresentations = supported.map {
+            ClipboardFingerprintRepresentation(uti: $0.uti, data: $0.data, itemIndex: $0.itemIndex)
+        }
+        let fingerprint = ClipboardFingerprint.make(from: fingerprintRepresentations)
+        let contentIdentity = Set(supported.map(\.itemIndex)) == originalItemIndices
+            ? ClipboardFingerprint.textIdentity(from: fingerprintRepresentations)
+            : nil
         let kind = kind(for: supported)
         let item = ClipboardItem(
             kind: kind,
@@ -187,6 +207,7 @@ public final class PasteboardCapture: @unchecked Sendable {
             sourceBundleID: sourceBundleID,
             sourceName: sourceName,
             contentFingerprint: fingerprint,
+            contentIdentity: contentIdentity,
             representations: supported.map {
                 StoredRepresentation(uti: $0.uti, itemIndex: $0.itemIndex, byteCount: $0.data.count, payload: $0.data)
             },
@@ -261,6 +282,7 @@ public final class PasteboardCapture: @unchecked Sendable {
         )
         let extraction = Self.extract(
             representations: contents.representations,
+            originalItemIndices: contents.originalItemIndices,
             sourceBundleID: attribution.bundleID,
             sourceName: attribution.name
         )
@@ -313,7 +335,14 @@ public final class PasteboardCapture: @unchecked Sendable {
         return SourceAttribution(bundleID: application.bundleIdentifier, name: application.localizedName)
     }
 
-    private static func contents(from pasteboard: NSPasteboard) -> (representations: [Representation], typeIdentifiers: Set<String>, sourceBundleID: String?) {
+    private static func contents(
+        from pasteboard: NSPasteboard
+    ) -> (
+        representations: [Representation],
+        originalItemIndices: Set<Int>,
+        typeIdentifiers: Set<String>,
+        sourceBundleID: String?
+    ) {
         let available = pasteboard.pasteboardItems ?? []
         let typeIdentifiers = Set(available.flatMap { $0.types.map(\.rawValue) })
         let sourceType = NSPasteboard.PasteboardType("org.nspasteboard.source")
@@ -334,7 +363,7 @@ public final class PasteboardCapture: @unchecked Sendable {
                 return Representation(uti: uti, data: data, itemIndex: itemIndex)
             }
         }
-        return (representations, typeIdentifiers, sourceBundleID)
+        return (representations, Set(available.indices), typeIdentifiers, sourceBundleID)
     }
 
     private static func orderedSupportedRepresentations(from representations: [Representation]) -> [Representation] {
@@ -412,12 +441,6 @@ public final class PasteboardCapture: @unchecked Sendable {
             .joined(separator: " ")
         guard collapsed.count > 240 else { return collapsed }
         return String(collapsed.prefix(237)) + "…"
-    }
-
-    private static func fingerprint(for representations: [Representation]) -> String {
-        ClipboardFingerprint.make(from: representations.map {
-            ClipboardFingerprintRepresentation(uti: $0.uti, data: $0.data, itemIndex: $0.itemIndex)
-        })
     }
 
     private static let supportedUTIs = [

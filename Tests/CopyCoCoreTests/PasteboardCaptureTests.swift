@@ -132,6 +132,34 @@ final class PasteboardCaptureTests: XCTestCase {
         )
     }
 
+    func testExtractUsesTheSameTextIdentityForPlainAndPlainPlusHTMLPayloads() throws {
+        let plainOnly = PasteboardCapture.extract(representations: [
+            .init(uti: "public.utf8-plain-text", data: Data("same text".utf8), itemIndex: 0)
+        ])
+        let plainPlusHTML = PasteboardCapture.extract(representations: [
+            .init(uti: "public.utf8-plain-text", data: Data("same text".utf8), itemIndex: 0),
+            .init(uti: "public.html", data: Data("<b>same text</b>".utf8), itemIndex: 0)
+        ])
+
+        XCTAssertNotEqual(plainOnly.fingerprint, plainPlusHTML.fingerprint)
+        XCTAssertEqual(plainOnly.item?.contentIdentity, plainPlusHTML.item?.contentIdentity)
+        XCTAssertEqual(try XCTUnwrap(plainOnly.item?.contentIdentity).count, 64)
+    }
+
+    func testExtractRequiresPlainTextForEveryPasteboardItemBeforeBuildingTextIdentity() throws {
+        let richTextOnlyItem = PasteboardCapture.extract(representations: [
+            .init(uti: "public.utf8-plain-text", data: Data("first".utf8), itemIndex: 0),
+            .init(uti: "public.html", data: Data("<b>second</b>".utf8), itemIndex: 1)
+        ])
+        let unsupportedItem = PasteboardCapture.extract(representations: [
+            .init(uti: "public.utf8-plain-text", data: Data("first".utf8), itemIndex: 0),
+            .init(uti: "com.example.unsupported", data: Data([0x01]), itemIndex: 1)
+        ])
+
+        XCTAssertNil(try XCTUnwrap(richTextOnlyItem.item).contentIdentity)
+        XCTAssertNil(try XCTUnwrap(unsupportedItem.item).contentIdentity)
+    }
+
     func testCaptureBoundaryRejectsConcealedAndTransientTypes() {
         let extraction = PasteboardCapture.extract(
             representations: [.init(uti: "public.utf8-plain-text", data: Data("secret".utf8))]
