@@ -26,6 +26,7 @@ enum PendingPasteReason: Equatable {
 struct PendingPasteSession {
     enum Phase: Equatable {
         case idle
+        case copying
         case restoring
         case armed
         case submitting
@@ -37,11 +38,20 @@ struct PendingPasteSession {
 
     var consumesHotKey: Bool { phase != .idle }
 
-    mutating func beginRestoring(item: ClipboardItem) -> Int {
+    mutating func beginCopying(item: ClipboardItem) -> Int {
         generation &+= 1
         self.item = item
-        phase = .restoring
+        phase = .copying
         return generation
+    }
+
+    @discardableResult
+    mutating func beginRestoring(generation: Int) -> Bool {
+        guard self.generation == generation, phase == .copying, item != nil else {
+            return false
+        }
+        phase = .restoring
+        return true
     }
 
     @discardableResult
@@ -55,25 +65,33 @@ struct PendingPasteSession {
 
     mutating func beginSubmission(
         using snapshot: DestinationFocusSnapshot
-    ) -> (item: ClipboardItem, application: NSRunningApplication)? {
+    ) -> (item: ClipboardItem, application: NSRunningApplication, generation: Int)? {
         guard phase == .armed,
               let item,
               let application = snapshot.validatedApplication else {
             return nil
         }
         phase = .submitting
-        return (item, application)
+        return (item, application, generation)
     }
 
-    mutating func finishSubmission(_ result: PasteResult) {
-        guard phase == .submitting else { return }
+    @discardableResult
+    mutating func finishSubmission(_ result: PasteResult, generation: Int) -> Bool {
+        guard self.generation == generation, phase == .submitting else {
+            return false
+        }
         if case .pasted = result {
-            generation &+= 1
+            self.generation &+= 1
             item = nil
             phase = .idle
         } else {
             phase = .armed
         }
+        return true
+    }
+
+    func shouldExpire(generation: Int) -> Bool {
+        self.generation == generation && phase == .armed && item != nil
     }
 
     mutating func cancel() {
@@ -103,6 +121,8 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     private var pendingPasteSession = PendingPasteSession()
     private var pendingPasteTask: Task<Void, Never>?
     private var pendingRestoreTask: Task<Void, Never>?
+    private var activePasteTask: Task<Void, Never>?
+    private var pasteOperationGeneration = 0
     private var guidanceBanner: NSPanel?
     private var guidanceBannerTask: Task<Void, Never>?
     /// Called right before the history panel is presented, so the app can
@@ -184,9 +204,12 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         }
         isPasting = true
         panel?.orderOut(nil)
-        appState.paste(item: item, to: destination) { [weak self] result in
+        let operationGeneration = beginPasteOperation()
+        activePasteTask = appState.paste(item: item, to: destination) { [weak self] result in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self,
+                      self.pasteOperationGeneration == operationGeneration else { return }
+                self.activePasteTask = nil
                 self.isPasting = false
                 if Self.shouldRestorePanel(after: result) {
                     // Refresh the failure message when the panel comes back so
@@ -219,10 +242,20 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
             showPendingPasteGuidance(reason: .noTextCursor)
             return true
         }
-        appState.paste(item: submission.item, to: submission.application) { [weak self] result in
+        pendingPasteTask?.cancel()
+        pendingPasteTask = nil
+        isPasting = true
+        let operationGeneration = beginPasteOperation()
+        activePasteTask = appState.paste(item: submission.item, to: submission.application) { [weak self] result in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.pendingPasteSession.finishSubmission(result)
+                guard let self,
+                      self.pasteOperationGeneration == operationGeneration,
+                      self.pendingPasteSession.finishSubmission(
+                        result,
+                        generation: submission.generation
+                      ) else { return }
+                self.activePasteTask = nil
+                self.isPasting = false
                 if case .pasted = result {
                     self.cancelPendingPaste(clearingStatus: true)
                 } else {
@@ -234,6 +267,7 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     }
 
     func cancelPendingPaste(clearingStatus: Bool = true) {
+        cancelActivePasteOperation()
         pendingRestoreTask?.cancel()
         pendingRestoreTask = nil
         pendingPasteTask?.cancel()
@@ -271,6 +305,7 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         let application = restorePreviousApplicationOnClose ? previouslyFrontmostApplication : nil
+        cancelPendingPaste(clearingStatus: true)
         restorePreviousApplicationOnClose = true
         previouslyFrontmostApplication = nil
         appState.pasteDestination = nil
@@ -282,34 +317,50 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     private func beginPendingPaste(item: ClipboardItem) {
         guard !isPasting else { return }
         isPasting = true
-        appState.copy(item: item) { [weak self] result in
+        let pendingGeneration = pendingPasteSession.beginCopying(item: item)
+        let operationGeneration = beginPasteOperation()
+        activePasteTask = appState.copy(item: item) { [weak self] result in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self,
+                      self.pasteOperationGeneration == operationGeneration,
+                      self.pendingPasteSession.generation == pendingGeneration,
+                      self.pendingPasteSession.phase == .copying else { return }
+                self.activePasteTask = nil
                 self.isPasting = false
                 switch result {
                 case .copiedOnly:
                     // The panel may have been dismissed while the clipboard
                     // write was in flight; the content is already on the
                     // pasteboard, so do not arm a flow the user abandoned.
-                    guard self.panel?.isVisible == true else { return }
+                    guard self.panel?.isVisible == true,
+                          self.pendingPasteSession.beginRestoring(
+                            generation: pendingGeneration
+                          ) else {
+                        self.pendingPasteSession.cancel()
+                        return
+                    }
                     self.panel?.orderOut(nil)
-                    self.beginPendingRestore(item: item)
+                    self.beginPendingRestore(generation: pendingGeneration)
                 case let .failed(message):
+                    self.pendingPasteSession.cancel()
                     self.appState.showNotice(message)
                 case .pasted:
-                    break
+                    self.pendingPasteSession.cancel()
                 }
             }
         }
     }
 
     private func refreshPendingPasteTimeout() {
-        guard pendingPasteSession.item != nil else { return }
+        guard pendingPasteSession.phase == .armed else { return }
+        let generation = pendingPasteSession.generation
         pendingPasteTask?.cancel()
         pendingPasteTask = Task { [weak self] in
             try? await Task.sleep(for: Self.pendingPasteTimeout)
             guard !Task.isCancelled else { return }
-            self?.cancelPendingPaste()
+            guard let self,
+                  self.pendingPasteSession.shouldExpire(generation: generation) else { return }
+            self.cancelPendingPaste()
         }
     }
 
@@ -327,9 +378,8 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         appState.showPersistentStatus(message)
     }
 
-    private func beginPendingRestore(item: ClipboardItem) {
+    private func beginPendingRestore(generation: Int) {
         pendingRestoreTask?.cancel()
-        let generation = pendingPasteSession.beginRestoring(item: item)
         guard let destination = appState.pasteDestination, !destination.isTerminated else {
             finishPendingRestore(generation: generation, restored: false)
             return
@@ -347,6 +397,19 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         guard pendingPasteSession.arm(generation: generation) else { return }
         pendingRestoreTask = nil
         showPendingPasteGuidance(reason: restored ? .noTextCursor : .noDestination)
+    }
+
+    private func beginPasteOperation() -> Int {
+        activePasteTask?.cancel()
+        pasteOperationGeneration &+= 1
+        return pasteOperationGeneration
+    }
+
+    private func cancelActivePasteOperation() {
+        pasteOperationGeneration &+= 1
+        activePasteTask?.cancel()
+        activePasteTask = nil
+        isPasting = false
     }
 
     private func showGuidanceBanner(_ message: String) {

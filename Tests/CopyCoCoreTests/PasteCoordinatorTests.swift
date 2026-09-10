@@ -7,7 +7,6 @@ import XCTest
 @MainActor
 private final class PasteEventRecorder {
     var processIdentifiers: [pid_t] = []
-    var phases: [PasteEventPhase] = []
 }
 
 final class PasteCoordinatorTests: XCTestCase {
@@ -32,8 +31,8 @@ final class PasteCoordinatorTests: XCTestCase {
     }
 
     @MainActor
-    func testDestinationActivationYieldsBeforeRequestingActivationAndUsesObservedFrontmostState() async {
-        let destination = NSRunningApplication.current
+    func testDestinationActivationYieldsBeforeRequestingActivationAndUsesObservedFrontmostState() async throws {
+        let destination = try runningApplication()
         var calls: [String] = []
         var frontmostProcessIdentifier: pid_t?
         let activator = DestinationApplicationActivator(
@@ -57,7 +56,7 @@ final class PasteCoordinatorTests: XCTestCase {
     }
 
     @MainActor
-    func testDestinationActivationFailsWhenDestinationNeverBecomesFrontmost() async {
+    func testDestinationActivationFailsWhenDestinationNeverBecomesFrontmost() async throws {
         var frontmostChecks = 0
         let activator = DestinationApplicationActivator(
             yieldActivation: { _ in },
@@ -70,14 +69,14 @@ final class PasteCoordinatorTests: XCTestCase {
             maximumAttempts: 3
         )
 
-        let activationResult = await activator.activate(NSRunningApplication.current)
+        let activationResult = await activator.activate(try runningApplication())
         XCTAssertFalse(activationResult)
         XCTAssertEqual(frontmostChecks, 4)
     }
 
     @MainActor
-    func testDestinationActivationSkipsRequestsWhenDestinationIsAlreadyFrontmost() async {
-        let destination = NSRunningApplication.current
+    func testDestinationActivationSkipsRequestsWhenDestinationIsAlreadyFrontmost() async throws {
+        let destination = try runningApplication()
         var calls: [String] = []
         let activator = DestinationApplicationActivator(
             yieldActivation: { _ in calls.append("yield") },
@@ -96,7 +95,7 @@ final class PasteCoordinatorTests: XCTestCase {
 
     @MainActor
     func testPasteRejectsSplitWorkspaceAndAccessibilityTargets() async throws {
-        let destination = NSRunningApplication.current
+        let destination = try runningApplication()
         let targetPID = destination.processIdentifier
         let recorder = PasteEventRecorder()
         let coordinator = try makeTargetedCoordinator(
@@ -121,7 +120,7 @@ final class PasteCoordinatorTests: XCTestCase {
 
     @MainActor
     func testPasteRejectsMissingAccessibilityTargetPID() async throws {
-        let destination = NSRunningApplication.current
+        let destination = try runningApplication()
         let targetPID = destination.processIdentifier
         let recorder = PasteEventRecorder()
         let coordinator = try makeTargetedCoordinator(
@@ -146,7 +145,7 @@ final class PasteCoordinatorTests: XCTestCase {
 
     @MainActor
     func testPasteRejectsExplicitlyNonEditableFocus() async throws {
-        let destination = NSRunningApplication.current
+        let destination = try runningApplication()
         let targetPID = destination.processIdentifier
         let recorder = PasteEventRecorder()
         let coordinator = try makeTargetedCoordinator(
@@ -171,7 +170,7 @@ final class PasteCoordinatorTests: XCTestCase {
 
     @MainActor
     func testPasteWaitsUntilWorkspaceAndAccessibilityBothMatchTarget() async throws {
-        let destination = NSRunningApplication.current
+        let destination = try runningApplication()
         let targetPID = destination.processIdentifier
         let recorder = PasteEventRecorder()
         let notReady = DestinationFocusSnapshot(
@@ -195,13 +194,12 @@ final class PasteCoordinatorTests: XCTestCase {
         let result = await coordinator.paste(item: makeTextItem("wait for focus"), to: destination)
 
         XCTAssertEqual(result, .pasted)
-        XCTAssertEqual(recorder.processIdentifiers, [targetPID, targetPID])
-        XCTAssertEqual(recorder.phases, [.keyDown, .keyUp])
+        XCTAssertEqual(recorder.processIdentifiers, [targetPID])
     }
 
     @MainActor
     func testPasteRevalidatesTargetImmediatelyBeforePosting() async throws {
-        let destination = NSRunningApplication.current
+        let destination = try runningApplication()
         let targetPID = destination.processIdentifier
         let recorder = PasteEventRecorder()
         let ready = DestinationFocusSnapshot(
@@ -231,7 +229,7 @@ final class PasteCoordinatorTests: XCTestCase {
 
     @MainActor
     func testPastePostsBothEventsToTheVerifiedTargetPID() async throws {
-        let destination = NSRunningApplication.current
+        let destination = try runningApplication()
         let targetPID = destination.processIdentifier
         let recorder = PasteEventRecorder()
         let ready = DestinationFocusSnapshot(
@@ -248,7 +246,60 @@ final class PasteCoordinatorTests: XCTestCase {
         let result = await coordinator.paste(item: makeTextItem("targeted paste"), to: destination)
 
         XCTAssertEqual(result, .pasted)
-        XCTAssertEqual(recorder.processIdentifiers, [targetPID, targetPID])
+        XCTAssertEqual(recorder.processIdentifiers, [targetPID])
+    }
+
+    @MainActor
+    func testPasteEventPairCreatesBothEventsBeforePostingThemToOnePID() throws {
+        let targetPID = try runningApplication().processIdentifier
+        var posted: [(pid_t, CGEventType)] = []
+
+        let result = PasteCoordinator.postPasteEventPair(
+            processIdentifier: targetPID,
+            makeEvent: { phase in
+                CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: phase == .keyDown)
+            },
+            postEvent: { event, pid in posted.append((pid, event.type)) }
+        )
+
+        XCTAssertTrue(result)
+        XCTAssertEqual(posted.map(\.0), [targetPID, targetPID])
+        XCTAssertEqual(posted.map(\.1), [.keyDown, .keyUp])
+    }
+
+    @MainActor
+    func testPasteEventPairPostsNothingWhenEitherEventCannotBeCreated() throws {
+        let targetPID = try runningApplication().processIdentifier
+        for failedPhase in [PasteEventPhase.keyDown, .keyUp] {
+            var postedPIDs: [pid_t] = []
+            let result = PasteCoordinator.postPasteEventPair(
+                processIdentifier: targetPID,
+                makeEvent: { phase in
+                    guard phase != failedPhase else { return nil }
+                    return CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: phase == .keyDown)
+                },
+                postEvent: { _, pid in postedPIDs.append(pid) }
+            )
+
+            XCTAssertFalse(result)
+            XCTAssertEqual(postedPIDs, [])
+        }
+    }
+
+    @MainActor
+    func testInvalidProcessIdentifiersCannotValidateOrBecomePasteTargets() {
+        let invalidSnapshot = DestinationFocusSnapshot(
+            workspaceApplication: nil,
+            workspacePID: 0,
+            axPID: 0,
+            acceptsTextInput: true
+        )
+
+        XCTAssertFalse(invalidSnapshot.validates(processIdentifier: 0))
+        XCTAssertFalse(PasteCoordinator.isValidDestination(processIdentifier: 0, isTerminated: false))
+        XCTAssertFalse(PasteCoordinator.isValidDestination(processIdentifier: -1, isTerminated: false))
+        XCTAssertFalse(PasteCoordinator.isValidDestination(processIdentifier: 42, isTerminated: true))
+        XCTAssertTrue(PasteCoordinator.isValidDestination(processIdentifier: 42, isTerminated: false))
     }
 
     @MainActor
@@ -415,7 +466,7 @@ final class PasteCoordinatorTests: XCTestCase {
     ) throws -> PasteCoordinator {
         let rootURL = try makeTemporaryDirectory()
         let pasteboard = NSPasteboard(name: .init("CopyCoTargetedPaste-\(UUID().uuidString)"))
-        let destination = NSRunningApplication.current
+        let destinationPID = try XCTUnwrap(snapshots.first?.workspaceApplication?.processIdentifier)
         var remainingSnapshots = snapshots
         return PasteCoordinator(
             historyStore: HistoryStore(rootURL: rootURL),
@@ -424,7 +475,7 @@ final class PasteCoordinatorTests: XCTestCase {
             destinationActivator: DestinationApplicationActivator(
                 yieldActivation: { _ in },
                 requestActivation: { _ in true },
-                frontmostProcessIdentifier: { destination.processIdentifier },
+                frontmostProcessIdentifier: { destinationPID },
                 sleep: { _ in }
             ),
             focusReader: {
@@ -433,9 +484,8 @@ final class PasteCoordinatorTests: XCTestCase {
                 }
                 return remainingSnapshots[0]
             },
-            eventPoster: { pid, phase in
+            eventPoster: { pid in
                 recorder.processIdentifiers.append(pid)
-                recorder.phases.append(phase)
                 return true
             },
             focusMaximumAttempts: focusMaximumAttempts,
@@ -456,6 +506,15 @@ final class PasteCoordinatorTests: XCTestCase {
                 )
             ],
             totalBytes: data.count
+        )
+    }
+
+    @MainActor
+    private func runningApplication() throws -> NSRunningApplication {
+        try XCTUnwrap(
+            NSWorkspace.shared.runningApplications.first {
+                $0.processIdentifier > 0 && !$0.isTerminated
+            }
         )
     }
 }

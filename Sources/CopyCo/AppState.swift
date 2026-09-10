@@ -237,9 +237,11 @@ final class AppState: ObservableObject {
     /// Writes the item to the system pasteboard without activating a
     /// destination or synthesizing Command-V. Used by the two-phase paste
     /// flow to prepare the content before the user places the cursor.
-    func copy(item: ClipboardItem, completion: @escaping (PasteResult) -> Void = { _ in }) {
+    @discardableResult
+    func copy(item: ClipboardItem, completion: @escaping (PasteResult) -> Void = { _ in }) -> Task<Void, Never> {
         Task { [weak self] in
             guard let self else { return }
+            guard !Task.isCancelled else { return }
             let result = pasteCoordinator.copy(item: item)
             if case let .failed(message) = result {
                 showStatus(message)
@@ -259,10 +261,13 @@ final class AppState: ObservableObject {
     /// Pastes only to the explicitly supplied application. Callers must never
     /// pass a failed focus lookup through a nil fallback that can silently
     /// select a different frontmost application.
-    func paste(item: ClipboardItem, to destination: NSRunningApplication, completion: @escaping (PasteResult) -> Void = { _ in }) {
+    @discardableResult
+    func paste(item: ClipboardItem, to destination: NSRunningApplication, completion: @escaping (PasteResult) -> Void = { _ in }) -> Task<Void, Never> {
         Task { [weak self] in
             guard let self else { return }
+            guard !Task.isCancelled else { return }
             let result = await pasteCoordinator.paste(item: item, to: destination)
+            guard !Task.isCancelled else { return }
             accessibilityTrusted = accessibilityTrustProvider()
             switch result {
             case .pasted: showStatus(CopyCoCopy(language: language).pasted)

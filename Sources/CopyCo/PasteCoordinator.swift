@@ -16,7 +16,8 @@ struct DestinationFocusSnapshot: Sendable {
     let acceptsTextInput: Bool?
 
     func validates(processIdentifier: pid_t) -> Bool {
-        workspacePID == processIdentifier
+        processIdentifier > 0
+            && workspacePID == processIdentifier
             && axPID == processIdentifier
             && acceptsTextInput != false
     }
@@ -95,7 +96,7 @@ final class PasteCoordinator {
     private let isAccessibilityTrusted: () -> Bool
     private let destinationActivator: DestinationApplicationActivator
     private let focusReader: @MainActor () -> DestinationFocusSnapshot
-    private let eventPoster: @MainActor (pid_t, PasteEventPhase) -> Bool
+    private let eventPoster: @MainActor (pid_t) -> Bool
     private let focusMaximumAttempts: Int
     private let focusPollInterval: Duration
     private let focusSleep: (Duration) async -> Void
@@ -106,7 +107,9 @@ final class PasteCoordinator {
         isAccessibilityTrusted: @escaping () -> Bool = AccessibilityPermission.isTrusted,
         destinationActivator: DestinationApplicationActivator = DestinationApplicationActivator(),
         focusReader: @escaping @MainActor () -> DestinationFocusSnapshot = PasteCoordinator.readDestinationFocusSnapshot,
-        eventPoster: @escaping @MainActor (pid_t, PasteEventPhase) -> Bool = PasteCoordinator.postPasteEvent,
+        eventPoster: @escaping @MainActor (pid_t) -> Bool = { processIdentifier in
+            PasteCoordinator.postPasteEventPair(processIdentifier: processIdentifier)
+        },
         focusMaximumAttempts: Int = 40,
         focusPollInterval: Duration = .milliseconds(25),
         focusSleep: @escaping (Duration) async -> Void = { duration in try? await Task.sleep(for: duration) }
@@ -185,6 +188,12 @@ final class PasteCoordinator {
             return .failed(message: "Copied to the clipboard, but there is no destination application to paste into.")
         }
         let targetPID = application.processIdentifier
+        guard Self.isValidDestination(
+            processIdentifier: targetPID,
+            isTerminated: application.isTerminated
+        ) else {
+            return .failed(message: "Copied to the clipboard, but the destination application is no longer available.")
+        }
         let destinationIsFrontmost = await destinationActivator.activate(application)
         guard Self.shouldSendPaste(hasDestination: true, destinationIsFrontmost: destinationIsFrontmost) else {
             return .failed(message: "Copied to the clipboard, but the destination application could not be activated.")
@@ -202,9 +211,7 @@ final class PasteCoordinator {
             return .failed(message: "Copied to the clipboard, but focus moved to another application before paste.")
         }
 
-        let keyDownPosted = eventPoster(targetPID, .keyDown)
-        let keyUpPosted = eventPoster(targetPID, .keyUp)
-        guard keyDownPosted, keyUpPosted else {
+        guard eventPoster(targetPID) else {
             return .failed(message: "Unable to create the paste keyboard event.")
         }
         return .pasted
@@ -225,6 +232,10 @@ final class PasteCoordinator {
 
     static func shouldSendPaste(hasDestination: Bool, destinationIsFrontmost: Bool) -> Bool {
         return hasDestination && destinationIsFrontmost
+    }
+
+    static func isValidDestination(processIdentifier: pid_t, isTerminated: Bool) -> Bool {
+        processIdentifier > 0 && !isTerminated
     }
 
     /// Captures Workspace and Accessibility focus as one validation unit.
@@ -303,14 +314,22 @@ final class PasteCoordinator {
         return false
     }
 
-    private static func postPasteEvent(processIdentifier: pid_t, phase: PasteEventPhase) -> Bool {
-        guard let event = CGEvent(
-            keyboardEventSource: nil,
-            virtualKey: 9,
-            keyDown: phase.isKeyDown
-        ) else { return false }
-        event.flags = .maskCommand
-        event.postToPid(processIdentifier)
+    static func postPasteEventPair(
+        processIdentifier: pid_t,
+        makeEvent: (PasteEventPhase) -> CGEvent? = { phase in
+            CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: phase.isKeyDown)
+        },
+        postEvent: (CGEvent, pid_t) -> Void = { event, pid in event.postToPid(pid) }
+    ) -> Bool {
+        guard isValidDestination(processIdentifier: processIdentifier, isTerminated: false),
+              let keyDown = makeEvent(.keyDown),
+              let keyUp = makeEvent(.keyUp) else {
+            return false
+        }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        postEvent(keyDown, processIdentifier)
+        postEvent(keyUp, processIdentifier)
         return true
     }
 
