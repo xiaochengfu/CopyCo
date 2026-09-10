@@ -23,6 +23,66 @@ enum PendingPasteReason: Equatable {
     case noDestination
 }
 
+struct PendingPasteSession {
+    enum Phase: Equatable {
+        case idle
+        case restoring
+        case armed
+        case submitting
+    }
+
+    private(set) var phase: Phase = .idle
+    private(set) var item: ClipboardItem?
+    private(set) var generation = 0
+
+    var consumesHotKey: Bool { phase != .idle }
+
+    mutating func beginRestoring(item: ClipboardItem) -> Int {
+        generation &+= 1
+        self.item = item
+        phase = .restoring
+        return generation
+    }
+
+    @discardableResult
+    mutating func arm(generation: Int) -> Bool {
+        guard self.generation == generation, phase == .restoring, item != nil else {
+            return false
+        }
+        phase = .armed
+        return true
+    }
+
+    mutating func beginSubmission(
+        using snapshot: DestinationFocusSnapshot
+    ) -> (item: ClipboardItem, application: NSRunningApplication)? {
+        guard phase == .armed,
+              let item,
+              let application = snapshot.validatedApplication else {
+            return nil
+        }
+        phase = .submitting
+        return (item, application)
+    }
+
+    mutating func finishSubmission(_ result: PasteResult) {
+        guard phase == .submitting else { return }
+        if case .pasted = result {
+            generation &+= 1
+            item = nil
+            phase = .idle
+        } else {
+            phase = .armed
+        }
+    }
+
+    mutating func cancel() {
+        generation &+= 1
+        item = nil
+        phase = .idle
+    }
+}
+
 @MainActor
 final class HistoryPanelController: NSObject, NSWindowDelegate {
     static let hidesOnDeactivate = true
@@ -40,8 +100,9 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     private var restorePreviousApplicationOnClose = true
     private var isSearchFieldFocused = false
     private var presentationGate = HistoryPanelPresentationGate()
-    private var pendingPasteItem: ClipboardItem?
+    private var pendingPasteSession = PendingPasteSession()
     private var pendingPasteTask: Task<Void, Never>?
+    private var pendingRestoreTask: Task<Void, Never>?
     private var guidanceBanner: NSPanel?
     private var guidanceBannerTask: Task<Void, Never>?
     /// Called right before the history panel is presented, so the app can
@@ -50,10 +111,10 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     var onPanelWillPresent: (() -> Void)?
     /// Called when the history panel closes.
     var onPanelDidClose: (() -> Void)?
-    /// Whether the destination application had a text-input focus when the
-    /// panel was summoned. `nil` = unknown (no Accessibility permission or the
-    /// check failed); the paste proceeds as before in that case.
-    private var pasteTargetAcceptsTextInput: Bool?
+    /// Workspace and Accessibility identity observed immediately before the
+    /// panel was shown. Keeping the values together prevents mixing focus from
+    /// one application with a later Workspace frontmost result.
+    private var pasteTargetFocusSnapshot: DestinationFocusSnapshot?
 
     init(appState: AppState) { self.appState = appState }
 
@@ -61,12 +122,9 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         cancelPendingPaste(clearingStatus: true)
         let wasVisible = panel?.isVisible == true
         if !wasVisible {
-            previouslyFrontmostApplication = NSWorkspace.shared.frontmostApplication
-            // Snapshot the destination's text-input focus BEFORE the panel
-            // activates CopyCo: AX focus only exists for the frontmost app, and
-            // pasting into a non-editable focus (desktop, file list) silently
-            // does nothing.
-            pasteTargetAcceptsTextInput = PasteCoordinator.frontmostApplicationAcceptsTextInput()
+            let focusSnapshot = appState.destinationFocusSnapshot()
+            pasteTargetFocusSnapshot = focusSnapshot
+            previouslyFrontmostApplication = focusSnapshot.workspaceApplication
         }
         appState.pasteDestination = previouslyFrontmostApplication
         let panel = panel ?? makePanel()
@@ -102,6 +160,11 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         guard !isPasting else { return }
         let destination = appState.pasteDestination
         let hasLiveDestination = destination.map { !$0.isTerminated } ?? false
+        let hasVerifiedDestination = destination.map { destination in
+            pasteTargetFocusSnapshot?.validates(
+                processIdentifier: destination.processIdentifier
+            ) == true
+        } ?? false
         // Pre-flight: when the destination has no text-input focus (desktop,
         // file browser, no focused field) or is missing, switch to the
         // two-phase flow: prepare the clipboard, guide the user to place the
@@ -109,15 +172,19 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         // complete the paste. A blind Command-V into a non-editable focus
         // silently does nothing.
         if Self.shouldBeginPendingPaste(
-            acceptsTextInput: pasteTargetAcceptsTextInput,
-            hasLiveDestination: hasLiveDestination
+            acceptsTextInput: pasteTargetFocusSnapshot?.acceptsTextInput,
+            hasLiveDestination: hasLiveDestination && hasVerifiedDestination
         ) {
+            beginPendingPaste(item: item)
+            return
+        }
+        guard let destination else {
             beginPendingPaste(item: item)
             return
         }
         isPasting = true
         panel?.orderOut(nil)
-        appState.paste(item: item) { [weak self] result in
+        appState.paste(item: item, to: destination) { [weak self] result in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isPasting = false
@@ -142,25 +209,36 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     /// Returns `true` when the pending state consumed the press; `false` when
     /// the caller should show the history panel as usual.
     func handlePendingPasteHotKey() -> Bool {
-        guard let item = pendingPasteItem else { return false }
-        // A global hot key does not activate CopyCo, so the destination app is
-        // still frontmost at this instant — the AX focus check is live and
-        // accurate (unlike the snapshot taken when the panel was summoned).
-        if !Self.shouldCompletePendingPaste(
-            acceptsTextInput: PasteCoordinator.frontmostApplicationAcceptsTextInput()
-        ) {
+        guard pendingPasteSession.consumesHotKey else { return false }
+        guard pendingPasteSession.phase == .armed else { return true }
+
+        // Read Workspace and AX exactly once. The validated application comes
+        // from that same snapshot, so there is no AX(A)/Workspace(B) split.
+        let snapshot = appState.destinationFocusSnapshot()
+        guard let submission = pendingPasteSession.beginSubmission(using: snapshot) else {
             showPendingPasteGuidance(reason: .noTextCursor)
             return true
         }
-        cancelPendingPaste(clearingStatus: true)
-        appState.paste(item: item, to: NSWorkspace.shared.frontmostApplication)
+        appState.paste(item: submission.item, to: submission.application) { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.pendingPasteSession.finishSubmission(result)
+                if case .pasted = result {
+                    self.cancelPendingPaste(clearingStatus: true)
+                } else {
+                    self.showPendingPasteGuidance(reason: .noTextCursor)
+                }
+            }
+        }
         return true
     }
 
     func cancelPendingPaste(clearingStatus: Bool = true) {
+        pendingRestoreTask?.cancel()
+        pendingRestoreTask = nil
         pendingPasteTask?.cancel()
         pendingPasteTask = nil
-        pendingPasteItem = nil
+        pendingPasteSession.cancel()
         hideGuidanceBanner()
         if clearingStatus {
             appState.showPersistentStatus(nil)
@@ -171,12 +249,6 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     /// has no text-input focus or is missing entirely.
     static func shouldBeginPendingPaste(acceptsTextInput: Bool?, hasLiveDestination: Bool) -> Bool {
         acceptsTextInput == false || !hasLiveDestination
-    }
-
-    /// Whether a second hot-key press should complete the pending paste.
-    /// `nil` (inconclusive Accessibility check) proceeds as a best effort.
-    static func shouldCompletePendingPaste(acceptsTextInput: Bool?) -> Bool {
-        acceptsTextInput != false
     }
 
     static func pendingPasteReason(hasLiveDestination: Bool, acceptsTextInput: Bool?) -> PendingPasteReason {
@@ -202,6 +274,7 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         restorePreviousApplicationOnClose = true
         previouslyFrontmostApplication = nil
         appState.pasteDestination = nil
+        pasteTargetFocusSnapshot = nil
         application?.activate(options: [])
         onPanelDidClose?()
     }
@@ -219,16 +292,8 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
                     // write was in flight; the content is already on the
                     // pasteboard, so do not arm a flow the user abandoned.
                     guard self.panel?.isVisible == true else { return }
-                    self.armPendingPaste(item: item)
                     self.panel?.orderOut(nil)
-                    self.restoreTargetApplication()
-                    let hasLiveDestination = self.appState.pasteDestination.map { !$0.isTerminated } ?? false
-                    self.showPendingPasteGuidance(
-                        reason: Self.pendingPasteReason(
-                            hasLiveDestination: hasLiveDestination,
-                            acceptsTextInput: self.pasteTargetAcceptsTextInput
-                        )
-                    )
+                    self.beginPendingRestore(item: item)
                 case let .failed(message):
                     self.appState.showNotice(message)
                 case .pasted:
@@ -238,9 +303,9 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func armPendingPaste(item: ClipboardItem) {
+    private func refreshPendingPasteTimeout() {
+        guard pendingPasteSession.item != nil else { return }
         pendingPasteTask?.cancel()
-        pendingPasteItem = item
         pendingPasteTask = Task { [weak self] in
             try? await Task.sleep(for: Self.pendingPasteTimeout)
             guard !Task.isCancelled else { return }
@@ -249,10 +314,10 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     }
 
     private func showPendingPasteGuidance(reason: PendingPasteReason) {
-        guard let item = pendingPasteItem else { return }
+        guard pendingPasteSession.item != nil else { return }
         // Every guidance pass extends the window, so the flow stays alive
         // while the user is actively trying to place the cursor.
-        armPendingPaste(item: item)
+        refreshPendingPasteTimeout()
         let copy = CopyCoCopy(language: appState.language)
         let hotKey = appState.hotKeyConfiguration.displayName
         let message = reason == .noDestination
@@ -262,10 +327,26 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         appState.showPersistentStatus(message)
     }
 
-    private func restoreTargetApplication() {
-        guard let destination = appState.pasteDestination, !destination.isTerminated else { return }
-        NSApp.yieldActivation(to: destination)
-        destination.activate(from: .current, options: [])
+    private func beginPendingRestore(item: ClipboardItem) {
+        pendingRestoreTask?.cancel()
+        let generation = pendingPasteSession.beginRestoring(item: item)
+        guard let destination = appState.pasteDestination, !destination.isTerminated else {
+            finishPendingRestore(generation: generation, restored: false)
+            return
+        }
+
+        pendingRestoreTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let restored = await self.appState.activatePasteDestination(destination)
+            guard !Task.isCancelled else { return }
+            self.finishPendingRestore(generation: generation, restored: restored)
+        }
+    }
+
+    private func finishPendingRestore(generation: Int, restored: Bool) {
+        guard pendingPasteSession.arm(generation: generation) else { return }
+        pendingRestoreTask = nil
+        showPendingPasteGuidance(reason: restored ? .noTextCursor : .noDestination)
     }
 
     private func showGuidanceBanner(_ message: String) {

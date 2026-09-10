@@ -248,8 +248,18 @@ final class AppState: ObservableObject {
         }
     }
 
-    func paste(item: ClipboardItem, to destination: NSRunningApplication? = nil, completion: @escaping (PasteResult) -> Void = { _ in }) {
-        let destination = destination ?? pasteDestination ?? NSWorkspace.shared.frontmostApplication
+    func destinationFocusSnapshot() -> DestinationFocusSnapshot {
+        pasteCoordinator.destinationFocusSnapshot()
+    }
+
+    func activatePasteDestination(_ destination: NSRunningApplication) async -> Bool {
+        await pasteCoordinator.activateDestination(destination)
+    }
+
+    /// Pastes only to the explicitly supplied application. Callers must never
+    /// pass a failed focus lookup through a nil fallback that can silently
+    /// select a different frontmost application.
+    func paste(item: ClipboardItem, to destination: NSRunningApplication, completion: @escaping (PasteResult) -> Void = { _ in }) {
         Task { [weak self] in
             guard let self else { return }
             let result = await pasteCoordinator.paste(item: item, to: destination)

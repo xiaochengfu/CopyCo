@@ -4,6 +4,12 @@ import XCTest
 @testable import CopyCo
 @testable import CopyCoCore
 
+@MainActor
+private final class PasteEventRecorder {
+    var processIdentifiers: [pid_t] = []
+    var phases: [PasteEventPhase] = []
+}
+
 final class PasteCoordinatorTests: XCTestCase {
     @MainActor
     func testGroupsRepeatedUTIsByOriginalPasteboardItemIndex() {
@@ -66,7 +72,183 @@ final class PasteCoordinatorTests: XCTestCase {
 
         let activationResult = await activator.activate(NSRunningApplication.current)
         XCTAssertFalse(activationResult)
-        XCTAssertEqual(frontmostChecks, 3)
+        XCTAssertEqual(frontmostChecks, 4)
+    }
+
+    @MainActor
+    func testDestinationActivationSkipsRequestsWhenDestinationIsAlreadyFrontmost() async {
+        let destination = NSRunningApplication.current
+        var calls: [String] = []
+        let activator = DestinationApplicationActivator(
+            yieldActivation: { _ in calls.append("yield") },
+            requestActivation: { _ in
+                calls.append("activate")
+                return true
+            },
+            frontmostProcessIdentifier: { destination.processIdentifier },
+            sleep: { _ in }
+        )
+
+        let activationResult = await activator.activate(destination)
+        XCTAssertTrue(activationResult)
+        XCTAssertEqual(calls, [])
+    }
+
+    @MainActor
+    func testPasteRejectsSplitWorkspaceAndAccessibilityTargets() async throws {
+        let destination = NSRunningApplication.current
+        let targetPID = destination.processIdentifier
+        let recorder = PasteEventRecorder()
+        let coordinator = try makeTargetedCoordinator(
+            snapshots: [
+                DestinationFocusSnapshot(
+                    workspaceApplication: destination,
+                    workspacePID: targetPID,
+                    axPID: targetPID + 1,
+                    acceptsTextInput: true
+                )
+            ],
+            recorder: recorder
+        )
+
+        let result = await coordinator.paste(item: makeTextItem("split target"), to: destination)
+
+        guard case .failed = result else {
+            return XCTFail("Expected a failed paste, got \(result)")
+        }
+        XCTAssertEqual(recorder.processIdentifiers, [])
+    }
+
+    @MainActor
+    func testPasteRejectsMissingAccessibilityTargetPID() async throws {
+        let destination = NSRunningApplication.current
+        let targetPID = destination.processIdentifier
+        let recorder = PasteEventRecorder()
+        let coordinator = try makeTargetedCoordinator(
+            snapshots: [
+                DestinationFocusSnapshot(
+                    workspaceApplication: destination,
+                    workspacePID: targetPID,
+                    axPID: nil,
+                    acceptsTextInput: true
+                )
+            ],
+            recorder: recorder
+        )
+
+        let result = await coordinator.paste(item: makeTextItem("missing AX pid"), to: destination)
+
+        guard case .failed = result else {
+            return XCTFail("Expected a failed paste, got \(result)")
+        }
+        XCTAssertEqual(recorder.processIdentifiers, [])
+    }
+
+    @MainActor
+    func testPasteRejectsExplicitlyNonEditableFocus() async throws {
+        let destination = NSRunningApplication.current
+        let targetPID = destination.processIdentifier
+        let recorder = PasteEventRecorder()
+        let coordinator = try makeTargetedCoordinator(
+            snapshots: [
+                DestinationFocusSnapshot(
+                    workspaceApplication: destination,
+                    workspacePID: targetPID,
+                    axPID: targetPID,
+                    acceptsTextInput: false
+                )
+            ],
+            recorder: recorder
+        )
+
+        let result = await coordinator.paste(item: makeTextItem("not editable"), to: destination)
+
+        guard case .failed = result else {
+            return XCTFail("Expected a failed paste, got \(result)")
+        }
+        XCTAssertEqual(recorder.processIdentifiers, [])
+    }
+
+    @MainActor
+    func testPasteWaitsUntilWorkspaceAndAccessibilityBothMatchTarget() async throws {
+        let destination = NSRunningApplication.current
+        let targetPID = destination.processIdentifier
+        let recorder = PasteEventRecorder()
+        let notReady = DestinationFocusSnapshot(
+            workspaceApplication: destination,
+            workspacePID: targetPID,
+            axPID: nil,
+            acceptsTextInput: nil
+        )
+        let ready = DestinationFocusSnapshot(
+            workspaceApplication: destination,
+            workspacePID: targetPID,
+            axPID: targetPID,
+            acceptsTextInput: true
+        )
+        let coordinator = try makeTargetedCoordinator(
+            snapshots: [notReady, ready, ready],
+            recorder: recorder,
+            focusMaximumAttempts: 2
+        )
+
+        let result = await coordinator.paste(item: makeTextItem("wait for focus"), to: destination)
+
+        XCTAssertEqual(result, .pasted)
+        XCTAssertEqual(recorder.processIdentifiers, [targetPID, targetPID])
+        XCTAssertEqual(recorder.phases, [.keyDown, .keyUp])
+    }
+
+    @MainActor
+    func testPasteRevalidatesTargetImmediatelyBeforePosting() async throws {
+        let destination = NSRunningApplication.current
+        let targetPID = destination.processIdentifier
+        let recorder = PasteEventRecorder()
+        let ready = DestinationFocusSnapshot(
+            workspaceApplication: destination,
+            workspacePID: targetPID,
+            axPID: targetPID,
+            acceptsTextInput: true
+        )
+        let changed = DestinationFocusSnapshot(
+            workspaceApplication: destination,
+            workspacePID: targetPID + 1,
+            axPID: targetPID + 1,
+            acceptsTextInput: true
+        )
+        let coordinator = try makeTargetedCoordinator(
+            snapshots: [ready, changed],
+            recorder: recorder
+        )
+
+        let result = await coordinator.paste(item: makeTextItem("final check"), to: destination)
+
+        guard case .failed = result else {
+            return XCTFail("Expected a failed paste, got \(result)")
+        }
+        XCTAssertEqual(recorder.processIdentifiers, [])
+    }
+
+    @MainActor
+    func testPastePostsBothEventsToTheVerifiedTargetPID() async throws {
+        let destination = NSRunningApplication.current
+        let targetPID = destination.processIdentifier
+        let recorder = PasteEventRecorder()
+        let ready = DestinationFocusSnapshot(
+            workspaceApplication: destination,
+            workspacePID: targetPID,
+            axPID: targetPID,
+            acceptsTextInput: nil
+        )
+        let coordinator = try makeTargetedCoordinator(
+            snapshots: [ready, ready],
+            recorder: recorder
+        )
+
+        let result = await coordinator.paste(item: makeTextItem("targeted paste"), to: destination)
+
+        XCTAssertEqual(result, .pasted)
+        XCTAssertEqual(recorder.processIdentifiers, [targetPID, targetPID])
     }
 
     @MainActor
@@ -223,5 +405,57 @@ final class PasteCoordinatorTests: XCTestCase {
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: rootURL) }
         return rootURL
+    }
+
+    @MainActor
+    private func makeTargetedCoordinator(
+        snapshots: [DestinationFocusSnapshot],
+        recorder: PasteEventRecorder,
+        focusMaximumAttempts: Int = 1
+    ) throws -> PasteCoordinator {
+        let rootURL = try makeTemporaryDirectory()
+        let pasteboard = NSPasteboard(name: .init("CopyCoTargetedPaste-\(UUID().uuidString)"))
+        let destination = NSRunningApplication.current
+        var remainingSnapshots = snapshots
+        return PasteCoordinator(
+            historyStore: HistoryStore(rootURL: rootURL),
+            pasteboard: pasteboard,
+            isAccessibilityTrusted: { true },
+            destinationActivator: DestinationApplicationActivator(
+                yieldActivation: { _ in },
+                requestActivation: { _ in true },
+                frontmostProcessIdentifier: { destination.processIdentifier },
+                sleep: { _ in }
+            ),
+            focusReader: {
+                if remainingSnapshots.count > 1 {
+                    return remainingSnapshots.removeFirst()
+                }
+                return remainingSnapshots[0]
+            },
+            eventPoster: { pid, phase in
+                recorder.processIdentifiers.append(pid)
+                recorder.phases.append(phase)
+                return true
+            },
+            focusMaximumAttempts: focusMaximumAttempts,
+            focusSleep: { _ in }
+        )
+    }
+
+    private func makeTextItem(_ text: String) -> ClipboardItem {
+        let data = Data(text.utf8)
+        return ClipboardItem(
+            kind: .text,
+            preview: text,
+            representations: [
+                StoredRepresentation(
+                    uti: "public.utf8-plain-text",
+                    byteCount: data.count,
+                    payload: data
+                )
+            ],
+            totalBytes: data.count
+        )
     }
 }
