@@ -302,6 +302,114 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertEqual(try payloadFileCount(in: rootURL), 3)
     }
 
+    func testInsertPreservesExplicitMissingIdentityAcrossReloadWithoutSemanticCollapse() throws {
+        let rootURL = try makeTemporaryDirectory()
+        let incomplete = try XCTUnwrap(PasteboardCapture.extract(representations: [
+            .init(uti: "public.utf8-plain-text", data: Data("same text".utf8), itemIndex: 0),
+            .init(uti: "public.html", data: Data("<b>same text</b>".utf8), itemIndex: 0),
+            .init(uti: "com.example.unsupported", data: Data([0x01]), itemIndex: 1)
+        ]).item)
+        XCTAssertNil(incomplete.contentIdentity)
+        let writer = HistoryStore(rootURL: rootURL)
+        try writer.insert(incomplete)
+
+        let encodedIndex = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: rootURL.appendingPathComponent("index.json"))
+            ) as? [[String: Any]]
+        )
+        XCTAssertTrue(encodedIndex[0]["contentIdentity"] is NSNull)
+
+        let store = HistoryStore(rootURL: rootURL)
+        try store.load()
+        let complete = try XCTUnwrap(PasteboardCapture.extract(representations: [
+            .init(uti: "public.utf8-plain-text", data: Data("same text".utf8), itemIndex: 0)
+        ]).item)
+        try store.insert(complete)
+
+        XCTAssertEqual(store.items().count, 2)
+        XCTAssertEqual(Set(store.items().map(\.id)), Set([incomplete.id, complete.id]))
+    }
+
+    func testSemanticPromotionEvictsUnpinnedNeighborToSatisfyByteLimit() throws {
+        let rootURL = try makeTemporaryDirectory()
+        let store = HistoryStore(
+            rootURL: rootURL,
+            limits: HistoryLimits(maxItems: 3, maxBytes: 10, maxInlineBytes: 10)
+        )
+        let originalID = UUID(uuidString: "00000000-0000-0000-0000-00000000003A")!
+        let original = try makeCapturedTextItem(
+            id: originalID,
+            createdAt: Date(timeIntervalSince1970: 1),
+            text: "a"
+        )
+        let neighbor = makeItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000003B")!,
+            createdAt: Date(timeIntervalSince1970: 2),
+            payload: Data("bbbb".utf8)
+        )
+        try store.insert(original)
+        try store.insert(neighbor)
+        let neighborPayloadURL = try XCTUnwrap(
+            store.items().first(where: { $0.id == neighbor.id })?.representations.first
+        ).payloadURL(relativeTo: rootURL)
+        let latest = try makeCapturedTextItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000003C")!,
+            createdAt: Date(timeIntervalSince1970: 3),
+            text: "a",
+            html: "<b>a</b>"
+        )
+
+        try store.insert(latest)
+
+        let promoted = try XCTUnwrap(store.items().first)
+        XCTAssertEqual(store.items().map(\.id), [originalID])
+        XCTAssertEqual(promoted.totalBytes, 9)
+        XCTAssertEqual(promoted.representations.map(\.uti), ["public.utf8-plain-text", "public.html"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: neighborPayloadURL.path))
+        XCTAssertEqual(try payloadFileCount(in: rootURL), 2)
+    }
+
+    func testSemanticPromotionRejectsReplacementRatherThanEvictingPinnedNeighbor() throws {
+        let rootURL = try makeTemporaryDirectory()
+        let store = HistoryStore(
+            rootURL: rootURL,
+            limits: HistoryLimits(maxItems: 3, maxBytes: 10, maxInlineBytes: 10)
+        )
+        let originalID = UUID(uuidString: "00000000-0000-0000-0000-00000000004A")!
+        let neighborID = UUID(uuidString: "00000000-0000-0000-0000-00000000004B")!
+        let original = try makeCapturedTextItem(
+            id: originalID,
+            createdAt: Date(timeIntervalSince1970: 1),
+            text: "a"
+        )
+        let neighbor = makeItem(
+            id: neighborID,
+            createdAt: Date(timeIntervalSince1970: 2),
+            payload: Data("bbbb".utf8)
+        )
+        try store.insert(original)
+        try store.insert(neighbor)
+        try store.setPinned(id: neighborID, pinned: true)
+        let originalPayloadURLs = store.items().flatMap { item in
+            item.representations.map { $0.payloadURL(relativeTo: rootURL) }
+        }
+        let latest = try makeCapturedTextItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000004C")!,
+            createdAt: Date(timeIntervalSince1970: 3),
+            text: "a",
+            html: "<b>a</b>"
+        )
+
+        XCTAssertThrowsError(try store.insert(latest))
+
+        XCTAssertEqual(Set(store.items().map(\.id)), Set([originalID, neighborID]))
+        XCTAssertTrue(store.items().first(where: { $0.id == neighborID })?.isPinned ?? false)
+        XCTAssertEqual(store.items().first(where: { $0.id == originalID })?.representations.count, 1)
+        XCTAssertTrue(originalPayloadURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        XCTAssertEqual(try payloadFileCount(in: rootURL), 2)
+    }
+
     func testInsertingSemanticTextDuplicateDerivesIdentityForLegacyIndexEntry() throws {
         let rootURL = try makeTemporaryDirectory()
         let originalID = UUID(uuidString: "00000000-0000-0000-0000-00000000001A")!
@@ -630,6 +738,7 @@ final class HistoryStoreTests: XCTestCase {
             sourceName: captured.sourceName,
             contentFingerprint: captured.contentFingerprint,
             contentIdentity: captured.contentIdentity,
+            contentIdentityIsKnown: captured.contentIdentityIsKnown,
             representations: captured.representations,
             totalBytes: captured.totalBytes,
             fullText: captured.fullText

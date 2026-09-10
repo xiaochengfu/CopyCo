@@ -80,7 +80,7 @@ public final class HistoryStore: @unchecked Sendable {
             let contentFingerprint = incomingFingerprintRepresentations.isEmpty
                 ? nil
                 : ClipboardFingerprint.make(from: incomingFingerprintRepresentations)
-            let contentIdentity = ClipboardFingerprint.textIdentity(from: incomingFingerprintRepresentations)
+            let contentIdentity = item.contentIdentityIsKnown ? item.contentIdentity : nil
             if let duplicate = try duplicateMatch(
                 for: item,
                 fingerprint: contentFingerprint,
@@ -89,6 +89,11 @@ public final class HistoryStore: @unchecked Sendable {
                 switch duplicate {
                 case let .exact(index):
                     let existing = storedItems[index]
+                    let promotedContentIdentity = item.contentIdentityIsKnown
+                        ? item.contentIdentity
+                        : existing.contentIdentity
+                    let promotedContentIdentityIsKnown = item.contentIdentityIsKnown
+                        || existing.contentIdentityIsKnown
                     let promoted = ClipboardItem(
                         id: existing.id,
                         createdAt: item.createdAt,
@@ -97,7 +102,8 @@ public final class HistoryStore: @unchecked Sendable {
                         sourceBundleID: item.sourceBundleID,
                         sourceName: item.sourceName,
                         contentFingerprint: contentFingerprint,
-                        contentIdentity: contentIdentity,
+                        contentIdentity: promotedContentIdentity,
+                        contentIdentityIsKnown: promotedContentIdentityIsKnown,
                         isPinned: existing.isPinned,
                         representations: existing.representations,
                         totalBytes: existing.totalBytes,
@@ -128,6 +134,7 @@ public final class HistoryStore: @unchecked Sendable {
                 sourceName: item.sourceName,
                 contentFingerprint: contentFingerprint,
                 contentIdentity: contentIdentity,
+                contentIdentityIsKnown: item.contentIdentityIsKnown,
                 isPinned: item.isPinned,
                 representations: item.representations,
                 totalBytes: item.totalBytes,
@@ -336,7 +343,7 @@ public final class HistoryStore: @unchecked Sendable {
             return .semantic(index)
         }
 
-        for index in storedItems.indices where storedItems[index].contentIdentity == nil {
+        for index in storedItems.indices where !storedItems[index].contentIdentityIsKnown {
             let storedRepresentations = try storedFingerprintRepresentations(for: storedItems[index])
             guard ClipboardFingerprint.textIdentity(from: storedRepresentations) == contentIdentity else { continue }
             return .semantic(index)
@@ -385,6 +392,7 @@ public final class HistoryStore: @unchecked Sendable {
             sourceName: item.sourceName,
             contentFingerprint: contentFingerprint,
             contentIdentity: contentIdentity,
+            contentIdentityIsKnown: true,
             isPinned: existing.isPinned,
             representations: preparedRepresentations,
             totalBytes: preparedRepresentations.reduce(0) { $0 + $1.byteCount },

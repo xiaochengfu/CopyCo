@@ -24,6 +24,9 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
     public let sourceName: String?
     public let contentFingerprint: String?
     public let contentIdentity: String?
+    /// Distinguishes an explicitly absent identity from a legacy index that
+    /// predates the field and may be migrated from its persisted payloads.
+    let contentIdentityIsKnown: Bool
     public var isPinned: Bool
     public var representations: [StoredRepresentation]
     public var totalBytes: Int
@@ -42,6 +45,38 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
         totalBytes: Int,
         fullText: String? = nil
     ) {
+        self.init(
+            id: id,
+            createdAt: createdAt,
+            kind: kind,
+            preview: preview,
+            sourceBundleID: sourceBundleID,
+            sourceName: sourceName,
+            contentFingerprint: contentFingerprint,
+            contentIdentity: contentIdentity,
+            contentIdentityIsKnown: contentIdentity != nil,
+            isPinned: isPinned,
+            representations: representations,
+            totalBytes: totalBytes,
+            fullText: fullText
+        )
+    }
+
+    init(
+        id: UUID = UUID(),
+        createdAt: Date = Date(),
+        kind: Kind,
+        preview: String,
+        sourceBundleID: String? = nil,
+        sourceName: String? = nil,
+        contentFingerprint: String? = nil,
+        contentIdentity: String? = nil,
+        contentIdentityIsKnown: Bool,
+        isPinned: Bool = false,
+        representations: [StoredRepresentation],
+        totalBytes: Int,
+        fullText: String? = nil
+    ) {
         self.id = id
         self.createdAt = createdAt
         self.kind = kind
@@ -50,6 +85,7 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
         self.sourceName = sourceName
         self.contentFingerprint = contentFingerprint
         self.contentIdentity = contentIdentity
+        self.contentIdentityIsKnown = contentIdentityIsKnown
         self.isPinned = isPinned
         self.representations = representations
         self.totalBytes = totalBytes
@@ -81,6 +117,7 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
         sourceBundleID = try container.decodeIfPresent(String.self, forKey: .sourceBundleID)
         sourceName = try container.decodeIfPresent(String.self, forKey: .sourceName)
         contentFingerprint = try container.decodeIfPresent(String.self, forKey: .contentFingerprint)
+        contentIdentityIsKnown = container.contains(.contentIdentity)
         contentIdentity = try container.decodeIfPresent(String.self, forKey: .contentIdentity)
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         representations = try container.decode([StoredRepresentation].self, forKey: .representations)
@@ -97,7 +134,13 @@ public struct ClipboardItem: Codable, Identifiable, Sendable, Equatable {
         try container.encode(sourceBundleID, forKey: .sourceBundleID)
         try container.encode(sourceName, forKey: .sourceName)
         try container.encodeIfPresent(contentFingerprint, forKey: .contentFingerprint)
-        try container.encodeIfPresent(contentIdentity, forKey: .contentIdentity)
+        if contentIdentityIsKnown {
+            if let contentIdentity {
+                try container.encode(contentIdentity, forKey: .contentIdentity)
+            } else {
+                try container.encodeNil(forKey: .contentIdentity)
+            }
+        }
         try container.encode(isPinned, forKey: .isPinned)
         try container.encode(representations, forKey: .representations)
         try container.encode(totalBytes, forKey: .totalBytes)

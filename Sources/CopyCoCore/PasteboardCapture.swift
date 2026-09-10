@@ -208,6 +208,7 @@ public final class PasteboardCapture: @unchecked Sendable {
             sourceName: sourceName,
             contentFingerprint: fingerprint,
             contentIdentity: contentIdentity,
+            contentIdentityIsKnown: true,
             representations: supported.map {
                 StoredRepresentation(uti: $0.uti, itemIndex: $0.itemIndex, byteCount: $0.data.count, payload: $0.data)
             },
