@@ -158,6 +158,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // the destination app is still frontmost at this instant,
                     // so the text-input focus can be re-checked accurately.
                     if !self.historyPanelController.handlePendingPasteHotKey() {
+                        await self.pasteboardCapture.captureNow()
+                        let snapshot = self.historyStore.itemsSnapshot()
+                        self.appState.refreshHistorySnapshot(snapshot.items, version: snapshot.version)
                         self.showHistoryPanel()
                     }
                 }

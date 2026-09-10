@@ -3,7 +3,80 @@ import Foundation
 import XCTest
 @testable import CopyCoCore
 
+private final class CallbackCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    func value() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
 final class PasteboardCaptureTests: XCTestCase {
+    func testCaptureNowRecordsABAWithoutWaitingForTimerAndPromotesOriginalA() async throws {
+        let pasteboard = NSPasteboard(name: .init("CopyCoCoreTests-Immediate-\(UUID().uuidString)"))
+        let rootURL = try makeTemporaryDirectory()
+        let store = HistoryStore(rootURL: rootURL)
+        let capture = PasteboardCapture(
+            pasteboard: pasteboard,
+            queue: DispatchQueue(label: "com.copyco.tests.capture.immediate")
+        )
+        capture.onItem = { item in
+            try? store.insert(item)
+        }
+        capture.start()
+        defer { capture.stop() }
+
+        write("A", to: pasteboard)
+        await capture.captureNow()
+        let originalAID = try XCTUnwrap(store.itemsSnapshot().items.first?.id)
+
+        write("B", to: pasteboard)
+        await capture.captureNow()
+
+        write("A", to: pasteboard)
+        await capture.captureNow()
+
+        let snapshot = store.itemsSnapshot().items
+        XCTAssertEqual(snapshot.map(\.preview), ["A", "B"])
+        XCTAssertEqual(snapshot.first?.id, originalAID)
+    }
+
+    func testCaptureNowDoesNotRedeliverAChangeAlreadyObservedByTimer() async throws {
+        let pasteboard = NSPasteboard(name: .init("CopyCoCoreTests-Barrier-\(UUID().uuidString)"))
+        let rootURL = try makeTemporaryDirectory()
+        let store = HistoryStore(rootURL: rootURL)
+        let capture = PasteboardCapture(
+            pasteboard: pasteboard,
+            queue: DispatchQueue(label: "com.copyco.tests.capture.barrier")
+        )
+        let callbackDelivered = DispatchSemaphore(value: 0)
+        let callbackCount = CallbackCounter()
+        capture.onItem = { item in
+            try? store.insert(item)
+            callbackCount.increment()
+            callbackDelivered.signal()
+        }
+        capture.start()
+        defer { capture.stop() }
+
+        write("single change", to: pasteboard)
+        XCTAssertEqual(callbackDelivered.wait(timeout: .now() + 2), .success)
+
+        await capture.captureNow()
+
+        XCTAssertEqual(callbackCount.value(), 1)
+        XCTAssertEqual(store.itemsSnapshot().items.map(\.preview), ["single change"])
+    }
+
     func testExtractClassifiesRichTextAheadOfPlainTextAndPreservesItemIndices() {
         let extraction = PasteboardCapture.extract(
             representations: [
@@ -283,5 +356,22 @@ final class PasteboardCaptureTests: XCTestCase {
         XCTAssertTrue(pasteboard.writeObjects([item]))
 
         XCTAssertEqual(stopReturned.wait(timeout: .now() + 2), .success)
+    }
+
+    private func write(_ text: String, to pasteboard: NSPasteboard) {
+        let item = NSPasteboardItem()
+        item.setString(text, forType: .string)
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects([item]))
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CopyCoCoreTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+        return rootURL
     }
 }

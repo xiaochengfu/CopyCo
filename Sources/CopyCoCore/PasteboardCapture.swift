@@ -161,6 +161,27 @@ public final class PasteboardCapture: @unchecked Sendable {
         timer?.cancel()
     }
 
+    /// Waits until the capture queue has observed the current pasteboard state.
+    /// The continuation resumes only after an eligible synchronous callback
+    /// has returned, so callers can safely read dependent history afterwards.
+    public func captureNow() async {
+        if DispatchQueue.getSpecific(key: queueIdentityKey) == queueIdentity {
+            captureIfChanged(generation: currentCaptureGeneration())
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume()
+                    return
+                }
+                self.captureIfChanged(generation: self.currentCaptureGeneration())
+                continuation.resume()
+            }
+        }
+    }
+
     public static func extract(
         representations: [Representation],
         sourceBundleID: String? = nil,
@@ -252,6 +273,12 @@ public final class PasteboardCapture: @unchecked Sendable {
         isOnCaptureQueue: Bool = false
     ) -> Bool {
         inFlightCallbacks > 0 && !isOnCaptureQueue
+    }
+
+    private func currentCaptureGeneration() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return captureGeneration
     }
 
     private func captureIfChanged(generation: Int) {
