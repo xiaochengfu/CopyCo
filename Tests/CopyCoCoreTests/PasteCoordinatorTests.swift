@@ -228,6 +228,31 @@ final class PasteCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testPasteRejectsTargetThatTerminatesAfterReadinessBeforeDelivery() async throws {
+        let destination = try runningApplication()
+        let targetPID = destination.processIdentifier
+        let recorder = PasteEventRecorder()
+        let ready = DestinationFocusSnapshot(
+            workspaceApplication: destination,
+            workspacePID: targetPID,
+            axPID: targetPID,
+            acceptsTextInput: true
+        )
+        let coordinator = try makeTargetedCoordinator(
+            snapshots: [ready, ready],
+            recorder: recorder,
+            terminationStates: [false, false, true]
+        )
+
+        let result = await coordinator.paste(item: makeTextItem("terminated target"), to: destination)
+
+        guard case .failed = result else {
+            return XCTFail("Expected a failed paste, got \(result)")
+        }
+        XCTAssertEqual(recorder.processIdentifiers, [])
+    }
+
+    @MainActor
     func testPastePostsBothEventsToTheVerifiedTargetPID() async throws {
         let destination = try runningApplication()
         let targetPID = destination.processIdentifier
@@ -462,12 +487,14 @@ final class PasteCoordinatorTests: XCTestCase {
     private func makeTargetedCoordinator(
         snapshots: [DestinationFocusSnapshot],
         recorder: PasteEventRecorder,
-        focusMaximumAttempts: Int = 1
+        focusMaximumAttempts: Int = 1,
+        terminationStates: [Bool] = []
     ) throws -> PasteCoordinator {
         let rootURL = try makeTemporaryDirectory()
         let pasteboard = NSPasteboard(name: .init("CopyCoTargetedPaste-\(UUID().uuidString)"))
         let destinationPID = try XCTUnwrap(snapshots.first?.workspaceApplication?.processIdentifier)
         var remainingSnapshots = snapshots
+        var remainingTerminationStates = terminationStates
         return PasteCoordinator(
             historyStore: HistoryStore(rootURL: rootURL),
             pasteboard: pasteboard,
@@ -483,6 +510,15 @@ final class PasteCoordinatorTests: XCTestCase {
                     return remainingSnapshots.removeFirst()
                 }
                 return remainingSnapshots[0]
+            },
+            isApplicationTerminated: { application in
+                guard !remainingTerminationStates.isEmpty else {
+                    return application.isTerminated
+                }
+                if remainingTerminationStates.count > 1 {
+                    return remainingTerminationStates.removeFirst()
+                }
+                return remainingTerminationStates[0]
             },
             eventPoster: { pid in
                 recorder.processIdentifiers.append(pid)

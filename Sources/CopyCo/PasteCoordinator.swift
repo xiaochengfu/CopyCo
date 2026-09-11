@@ -16,7 +16,12 @@ struct DestinationFocusSnapshot: Sendable {
     let acceptsTextInput: Bool?
 
     func validates(processIdentifier: pid_t) -> Bool {
-        processIdentifier > 0
+        guard let workspaceApplication,
+              workspaceApplication.processIdentifier == processIdentifier,
+              !workspaceApplication.isTerminated else {
+            return false
+        }
+        return processIdentifier > 0
             && workspacePID == processIdentifier
             && axPID == processIdentifier
             && acceptsTextInput != false
@@ -96,6 +101,7 @@ final class PasteCoordinator {
     private let isAccessibilityTrusted: () -> Bool
     private let destinationActivator: DestinationApplicationActivator
     private let focusReader: @MainActor () -> DestinationFocusSnapshot
+    private let isApplicationTerminated: @MainActor (NSRunningApplication) -> Bool
     private let eventPoster: @MainActor (pid_t) -> Bool
     private let focusMaximumAttempts: Int
     private let focusPollInterval: Duration
@@ -107,6 +113,7 @@ final class PasteCoordinator {
         isAccessibilityTrusted: @escaping () -> Bool = AccessibilityPermission.isTrusted,
         destinationActivator: DestinationApplicationActivator = DestinationApplicationActivator(),
         focusReader: @escaping @MainActor () -> DestinationFocusSnapshot = PasteCoordinator.readDestinationFocusSnapshot,
+        isApplicationTerminated: @escaping @MainActor (NSRunningApplication) -> Bool = { $0.isTerminated },
         eventPoster: @escaping @MainActor (pid_t) -> Bool = { processIdentifier in
             PasteCoordinator.postPasteEventPair(processIdentifier: processIdentifier)
         },
@@ -119,6 +126,7 @@ final class PasteCoordinator {
         self.isAccessibilityTrusted = isAccessibilityTrusted
         self.destinationActivator = destinationActivator
         self.focusReader = focusReader
+        self.isApplicationTerminated = isApplicationTerminated
         self.eventPoster = eventPoster
         self.focusMaximumAttempts = focusMaximumAttempts
         self.focusPollInterval = focusPollInterval
@@ -190,7 +198,7 @@ final class PasteCoordinator {
         let targetPID = application.processIdentifier
         guard Self.isValidDestination(
             processIdentifier: targetPID,
-            isTerminated: application.isTerminated
+            isTerminated: isApplicationTerminated(application)
         ) else {
             return .failed(message: "Copied to the clipboard, but the destination application is no longer available.")
         }
@@ -199,14 +207,17 @@ final class PasteCoordinator {
             return .failed(message: "Copied to the clipboard, but the destination application could not be activated.")
         }
 
-        guard await waitForReadyFocus(processIdentifier: targetPID) else {
+        guard await waitForReadyFocus(application: application) else {
             let snapshot = focusReader()
             Self.logFocusMismatch(stage: "readiness", intendedPID: targetPID, snapshot: snapshot)
             return .failed(message: "Copied to the clipboard, but the destination text field is no longer focused.")
         }
 
         let finalSnapshot = focusReader()
-        guard finalSnapshot.validates(processIdentifier: targetPID) else {
+        guard Self.isValidDestination(
+            processIdentifier: targetPID,
+            isTerminated: isApplicationTerminated(application)
+        ), finalSnapshot.validates(processIdentifier: targetPID) else {
             Self.logFocusMismatch(stage: "delivery", intendedPID: targetPID, snapshot: finalSnapshot)
             return .failed(message: "Copied to the clipboard, but focus moved to another application before paste.")
         }
@@ -301,9 +312,14 @@ final class PasteCoordinator {
         )
     }
 
-    private func waitForReadyFocus(processIdentifier: pid_t) async -> Bool {
+    private func waitForReadyFocus(application: NSRunningApplication) async -> Bool {
+        let processIdentifier = application.processIdentifier
         for attempt in 0..<focusMaximumAttempts {
             guard !Task.isCancelled else { return false }
+            guard Self.isValidDestination(
+                processIdentifier: processIdentifier,
+                isTerminated: isApplicationTerminated(application)
+            ) else { return false }
             if focusReader().validates(processIdentifier: processIdentifier) {
                 return true
             }
