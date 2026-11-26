@@ -23,7 +23,7 @@ enum FocusedElementTextInput {
 
     /// - Parameters:
     ///   - role: Accessibility role string (`kAXRoleAttribute`), if available.
-    ///   - isEditable: `kAXEditableAttribute` when the element exposes it.
+    ///   - isEditable: `kAXIsEditableAttribute` when the element exposes it.
     ///   - selection: Result of probing `kAXSelectedTextRangeAttribute`.
     /// - Returns: `true`/`false` when confident; `nil` when AX is inconclusive.
     static func acceptsTextInput(
