@@ -344,7 +344,7 @@ final class PasteCoordinator {
     /// eligible for Command-V paste.
     static func classifyTextInputAcceptance(focusedElement: AXUIElement) -> Bool? {
         let role = copyStringAttribute(focusedElement, kAXRoleAttribute as CFString)
-        let isEditable = copyBoolAttribute(focusedElement, kAXEditableAttribute as CFString)
+        let isEditable = copyBoolAttribute(focusedElement, kAXIsEditableAttribute as CFString)
         var selectionRange: CFTypeRef?
         let selectionError = AXUIElementCopyAttributeValue(
             focusedElement,
