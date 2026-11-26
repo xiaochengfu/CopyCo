@@ -278,20 +278,9 @@ final class PasteCoordinator {
                 &focusedUIElement
             )
             if uiElementError == .success, let focusedUIElement {
-                var selectionRange: CFTypeRef?
-                let selectionError = AXUIElementCopyAttributeValue(
-                    focusedUIElement as! AXUIElement,
-                    kAXSelectedTextRangeAttribute as CFString,
-                    &selectionRange
+                acceptsTextInput = classifyTextInputAcceptance(
+                    focusedElement: focusedUIElement as! AXUIElement
                 )
-                switch selectionError {
-                case .success:
-                    acceptsTextInput = true
-                case .attributeUnsupported, .noValue:
-                    acceptsTextInput = false
-                default:
-                    acceptsTextInput = nil
-                }
             }
         }
 
@@ -347,6 +336,58 @@ final class PasteCoordinator {
         postEvent(keyDown, processIdentifier)
         postEvent(keyUp, processIdentifier)
         return true
+    }
+
+    /// Reads role / editable / selected-text-range from a focused AX element
+    /// and classifies paste readiness. Password fields (`AXSecureTextField`)
+    /// typically reject selected-text-range probes; role detection keeps them
+    /// eligible for Command-V paste.
+    static func classifyTextInputAcceptance(focusedElement: AXUIElement) -> Bool? {
+        let role = copyStringAttribute(focusedElement, kAXRoleAttribute as CFString)
+        let isEditable = copyBoolAttribute(focusedElement, kAXEditableAttribute as CFString)
+        var selectionRange: CFTypeRef?
+        let selectionError = AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXSelectedTextRangeAttribute as CFString,
+            &selectionRange
+        )
+        let selection: FocusedElementTextInput.SelectionProbe
+        switch selectionError {
+        case .success:
+            selection = .supportsSelection
+        case .attributeUnsupported:
+            selection = .selectionUnsupported
+        case .noValue:
+            selection = .selectionUnavailable
+        default:
+            selection = .probeFailed
+        }
+        return FocusedElementTextInput.acceptsTextInput(
+            role: role,
+            isEditable: isEditable,
+            selection: selection
+        )
+    }
+
+    private static func copyStringAttribute(_ element: AXUIElement, _ attribute: CFString) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+              let value else {
+            return nil
+        }
+        return value as? String
+    }
+
+    private static func copyBoolAttribute(_ element: AXUIElement, _ attribute: CFString) -> Bool? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+              let value else {
+            return nil
+        }
+        if CFGetTypeID(value) == CFBooleanGetTypeID() {
+            return (value as! CFBoolean) == kCFBooleanTrue
+        }
+        return value as? Bool
     }
 
     private static func logFocusMismatch(

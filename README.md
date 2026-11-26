@@ -70,7 +70,13 @@ The directory contains an `index.json` metadata file and local binary payload fi
 
 Settings can increase the limits to 500 items and 1,024 MiB total. When a limit is exceeded, the oldest entries are evicted.
 
-CopyCo ignores concealed and transient pasteboards, configured excluded applications, and known password-manager sources. Clipboard history should still be treated as sensitive local data: pause capture before copying secrets and use **Clear history** when appropriate.
+CopyCo ignores concealed and transient pasteboards, configured excluded applications, and known password-manager sources. When such content is skipped, CopyCo shows a short status notice so a missing history entry is not mistaken for a capture failure. Clipboard history should still be treated as sensitive local data: pause capture before copying secrets and use **Clear history** when appropriate.
+
+### Password fields and Secure Event Input
+
+macOS enables **Secure Event Input** while focus is in a password field. In that mode the system does not deliver Carbon global hot keys to other apps, so `⌥⌘C` (or your custom shortcut) cannot open CopyCo. This is an OS protection; CopyCo does not disable Secure Event Input.
+
+While Secure Event Input is active, CopyCo shows a menu-bar status explaining the limit. Use the menu-bar **Show History** item instead, or leave the password field and press the shortcut again. Pasting a history item into a password field still requires Accessibility permission; CopyCo treats secure text fields as valid paste targets even when Accessibility withholds selected-text-range details.
 
 Supported entries include plain text, RTF/HTML, images, file URLs, and web URLs. Unsupported types and entries above the per-item limit are skipped. If a stored payload is missing or corrupt on a later launch, CopyCo drops that entry instead of attempting to paste incomplete data.
 

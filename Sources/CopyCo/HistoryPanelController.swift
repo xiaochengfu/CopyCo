@@ -371,11 +371,25 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         refreshPendingPasteTimeout()
         let copy = CopyCoCopy(language: appState.language)
         let hotKey = appState.hotKeyConfiguration.displayName
-        let message = reason == .noDestination
-            ? copy.pendingPasteNoDestinationHint(hotKey: hotKey)
-            : copy.pendingPasteReadyHint(hotKey: hotKey)
+        let message: String
+        if reason == .noDestination {
+            message = copy.pendingPasteNoDestinationHint(hotKey: hotKey)
+        } else if SecureEventInput.isEnabled() {
+            // Carbon hot keys are not delivered under Secure Event Input, so
+            // steer the user to ⌘V instead of another global-shortcut press.
+            message = copy.pendingPasteSecureInputHint()
+        } else {
+            message = copy.pendingPasteReadyHint(hotKey: hotKey)
+        }
         showGuidanceBanner(message)
         appState.showPersistentStatus(message)
+    }
+
+    /// Re-evaluates pending-paste guidance after Secure Event Input changes,
+    /// for example when the user leaves a password field.
+    func refreshPendingPasteGuidanceForSecureInputChange() {
+        guard pendingPasteSession.phase == .armed, pendingPasteSession.item != nil else { return }
+        showPendingPasteGuidance(reason: .noTextCursor)
     }
 
     private func beginPendingRestore(generation: Int) {

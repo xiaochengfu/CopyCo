@@ -12,6 +12,16 @@ final class PrivacyFilterTests: XCTestCase {
             change: PasteboardChange(typeIdentifiers: [PrivacyFilter.transientTypeIdentifier], fingerprint: "transient"),
             settings: PrivacySettings()
         ))
+        XCTAssertEqual(
+            PrivacyFilter.decide(
+                change: PasteboardChange(
+                    typeIdentifiers: ["public.utf8-plain-text", PrivacyFilter.concealedTypeIdentifier],
+                    fingerprint: "concealed"
+                ),
+                settings: PrivacySettings()
+            ),
+            .skip(.concealedOrTransient)
+        )
     }
 
     func testRejectsExcludedBundleIDWithoutCaseSensitivity() {
@@ -28,6 +38,17 @@ final class PrivacyFilterTests: XCTestCase {
             change: PasteboardChange(typeIdentifiers: ["public.utf8-plain-text"], sourceBundleID: "com.1password.1password", fingerprint: "password"),
             settings: PrivacySettings()
         ))
+        XCTAssertEqual(
+            PrivacyFilter.decide(
+                change: PasteboardChange(
+                    typeIdentifiers: ["public.utf8-plain-text"],
+                    sourceBundleID: "com.1password.1password",
+                    fingerprint: "password"
+                ),
+                settings: PrivacySettings()
+            ),
+            .skip(.excludedSource)
+        )
     }
 
     func testRejectsWhenRecordingIsPaused() {
@@ -35,6 +56,13 @@ final class PrivacyFilterTests: XCTestCase {
             change: PasteboardChange(typeIdentifiers: ["public.utf8-plain-text"], fingerprint: "paused"),
             settings: PrivacySettings(isPaused: true)
         ))
+        XCTAssertEqual(
+            PrivacyFilter.decide(
+                change: PasteboardChange(typeIdentifiers: ["public.utf8-plain-text"], fingerprint: "paused"),
+                settings: PrivacySettings(isPaused: true)
+            ),
+            .skip(.paused)
+        )
     }
 
     func testAcceptsPreviouslySeenFingerprintAsANewClipboardEvent() {

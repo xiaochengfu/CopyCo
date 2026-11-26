@@ -250,6 +250,15 @@ final class PasteboardCaptureTests: XCTestCase {
             sourceBundleID: "com.example.editor",
             settings: PrivacySettings()
         ))
+        XCTAssertEqual(
+            PasteboardCapture.privacyDecision(
+                extraction: extraction,
+                typeIdentifiers: ["public.utf8-plain-text", PrivacyFilter.concealedTypeIdentifier],
+                sourceBundleID: "com.example.editor",
+                settings: PrivacySettings()
+            ),
+            .skip(.concealedOrTransient)
+        )
     }
 
     func testCaptureBoundaryRejectsExcludedAndPasswordManagerSources() {
