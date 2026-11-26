@@ -94,9 +94,9 @@ final class SecureEventInputMonitor {
             return
         }
         let published = Self.transition(previous: lastEnabled, current: enabled)
-        if published != nil {
-            lastEnabled = enabled
-        }
+        // Always remember the latest probe, even when the first inactive sample
+        // is intentionally not published.
+        lastEnabled = enabled
         let callback = onChange
         lock.unlock()
         if let published {
