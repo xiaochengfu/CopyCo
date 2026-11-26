@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to build and publish (e.g. v1.0.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "Refusing non-version tag: $TAG" >&2
+            exit 1
+          fi
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build app (ad-hoc sign)
+        env:
+          COPYCO_SIGNING_IDENTITY: "-"
+        run: scripts/build-app.sh
+
+      - name: Package CopyCo.app.zip
+        id: package
+        run: |
+          set -euo pipefail
+          rm -f CopyCo.app.zip
+          ditto -c -k --keepParent build/CopyCo.app CopyCo.app.zip
+          SHA256="$(shasum -a 256 CopyCo.app.zip | awk '{print $1}')"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "SHA-256: $SHA256"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping create."
+            exit 0
+          fi
+
+          VERSION="${TAG#v}"
+          NOTES_FILE="$(mktemp)"
+          {
+            printf '%s\n' "# CopyCo ${TAG} 公开测试版"
+            printf '%s\n' ""
+            printf '%s\n' "> 本版本采用 ad-hoc 签名，尚未使用 Developer ID 签名和 Apple 公证。升级后 macOS 可能要求重新允许 CopyCo 的辅助功能权限。"
+            printf '%s\n' ""
+            printf '%s\n' "## 本次更新"
+            printf '%s\n' ""
+            printf '%s\n' "- 版本号更新至 ${VERSION}。"
+            printf '%s\n' "- 将安全文本框（密码输入框）识别为有效粘贴目标，即使辅助功能未返回选中文本范围，也可尝试直接粘贴。"
+            printf '%s\n' "- 在 Secure Event Input 启用时于菜单栏提示全局快捷键暂不可用，并引导改用菜单栏打开历史；离开密码框后提示快捷键已恢复。"
+            printf '%s\n' "- 跳过隐藏/临时剪贴板内容或密码管理器来源时显示简短状态提示，避免误以为复制失败。"
+            printf '%s\n' ""
+            printf '%s\n' "## 安装"
+            printf '%s\n' ""
+            printf '%s\n' "1. 完全退出正在运行的旧版 CopyCo。"
+            printf '%s\n' "2. 解压 \`CopyCo.app.zip\`，将 \`CopyCo.app\` 移动到“应用程序”文件夹。"
+            printf '%s\n' "3. 首次启动或升级后，在“系统设置 → 隐私与安全性 → 辅助功能”中确认 CopyCo 已启用；如直接粘贴不可用，请移除旧条目后重新添加新版 CopyCo。"
+            printf '%s\n' ""
+            printf '%s\n' "## 系统要求"
+            printf '%s\n' ""
+            printf '%s\n' "- macOS 15 或更高版本"
+            printf '%s\n' "- Apple Silicon（arm64）"
+            printf '%s\n' ""
+            printf '%s\n' "## 文件校验"
+            printf '%s\n' ""
+            printf '%s\n' "\`CopyCo.app.zip\`"
+            printf '%s\n' ""
+            printf '%s\n' "SHA-256：\`${SHA256}\`"
+          } > "$NOTES_FILE"
+
+          gh release create "$TAG" CopyCo.app.zip \
+            --title "CopyCo ${TAG} 公开测试版" \
+            --notes-file "$NOTES_FILE"
