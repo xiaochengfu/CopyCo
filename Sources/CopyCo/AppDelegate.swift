@@ -8,10 +8,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let historyStore: HistoryStore
     private let pasteboardCapture = PasteboardCapture()
     private let globalHotKey = GlobalHotKey()
+    private let secureEventInputMonitor = SecureEventInputMonitor()
     private var statusItem: NSStatusItem?
     private var statusMenu: NSMenu?
     private var settingsWindow: NSWindow?
     private var settingsWasVisibleBeforePanel = false
+    private var isSecureEventInputActive = false
+    /// True while the Secure Event Input status message is owned by CopyCo so
+    /// leaving a password field can clear or replace it without clobbering
+    /// unrelated notices.
+    private var showingSecureInputStatus = false
+    private var lastPrivacySkipNoticeAt: Date?
     private lazy var pasteCoordinator = PasteCoordinator(historyStore: historyStore)
     private lazy var appState = AppState(
         historyStore: historyStore,
@@ -72,7 +79,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 appState.showNotice(CopyCoCopy(language: appState.language).skippedLargeClipboardItem)
             }
         }
+        pasteboardCapture.onPrivacySkip = { [weak self] reason in
+            Task { @MainActor [weak self] in
+                self?.announcePrivacySkip(reason)
+            }
+        }
         pasteboardCapture.start()
+
+        secureEventInputMonitor.onChange = { [weak self] enabled in
+            Task { @MainActor [weak self] in
+                self?.handleSecureEventInputChange(enabled)
+            }
+        }
+        secureEventInputMonitor.start()
 
         registerGlobalHotKey(appState.hotKeyConfiguration)
         DispatchQueue.main.async { [weak self] in
@@ -82,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         pasteboardCapture.stop()
+        secureEventInputMonitor.stop()
         globalHotKey.unregister()
         statusItem = nil
     }
@@ -168,6 +188,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             NSLog("CopyCo could not register global hot key \(configuration.displayName): \(error.localizedDescription)")
             appState.showNotice(CopyCoCopy(language: appState.language).shortcutUnavailable(configuration.displayName))
+        }
+    }
+
+    /// Secure Event Input (password fields) suppresses Carbon hot-key delivery.
+    /// CopyCo never disables it. The hot key works again after the user leaves
+    /// the field; meanwhile the menu-bar "Show History" path still works.
+    private func handleSecureEventInputChange(_ enabled: Bool) {
+        let wasEnabled = isSecureEventInputActive
+        isSecureEventInputActive = enabled
+        let copy = CopyCoCopy(language: appState.language)
+        let hotKey = appState.hotKeyConfiguration.displayName
+
+        if enabled {
+            showingSecureInputStatus = true
+            appState.showPersistentStatus(copy.secureInputShortcutUnavailable(hotKey: hotKey))
+            historyPanelController.refreshPendingPasteGuidanceForSecureInputChange()
+            return
+        }
+
+        historyPanelController.refreshPendingPasteGuidanceForSecureInputChange()
+        if showingSecureInputStatus {
+            showingSecureInputStatus = false
+            appState.showPersistentStatus(nil)
+        }
+        if wasEnabled {
+            // After leaving the password field, Carbon delivers the hot key
+            // again — tell the user instead of auto-opening the panel.
+            appState.showNotice(copy.secureInputShortcutRestored(hotKey: hotKey))
+        }
+    }
+
+    private func announcePrivacySkip(_ reason: PrivacyFilter.Reason) {
+        // Pause skips are intentional user actions; do not toast them.
+        guard reason != .paused else { return }
+        let now = Date()
+        if let lastPrivacySkipNoticeAt, now.timeIntervalSince(lastPrivacySkipNoticeAt) < 2 {
+            return
+        }
+        lastPrivacySkipNoticeAt = now
+        let copy = CopyCoCopy(language: appState.language)
+        switch reason {
+        case .concealedOrTransient:
+            appState.showNotice(copy.skippedConcealedClipboardItem)
+        case .excludedSource:
+            appState.showNotice(copy.skippedExcludedClipboardSource)
+        case .paused:
+            break
+        }
+        // Transient notices clear the status after two seconds; restore the
+        // Secure Event Input hint if the password field is still focused.
+        guard isSecureEventInputActive else { return }
+        let hotKey = appState.hotKeyConfiguration.displayName
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(2100))
+            guard let self, self.isSecureEventInputActive else { return }
+            self.showingSecureInputStatus = true
+            self.appState.showPersistentStatus(
+                CopyCoCopy(language: self.appState.language).secureInputShortcutUnavailable(hotKey: hotKey)
+            )
         }
     }
 

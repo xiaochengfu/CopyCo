@@ -65,8 +65,8 @@ struct CopyCoCopy: Sendable {
     var shortcutTitle: String { language == .simplifiedChinese ? "历史面板快捷键" : "History panel shortcut" }
     var shortcutHelp: String {
         language == .simplifiedChinese
-            ? "点击按钮后按下组合键，新快捷键会立即生效。"
-            : "Press the button, then press a modifier key combination. The new shortcut takes effect immediately."
+            ? "点击按钮后按下组合键，新快捷键会立即生效。密码输入框会启用系统 Secure Event Input，此时全局快捷键不可用，请改用菜单栏或离开密码框后再试。"
+            : "Press the button, then press a modifier key combination. The new shortcut takes effect immediately. Password fields enable Secure Event Input, which blocks global shortcuts — use the menu bar, or leave the field and try again."
     }
     var pressKeys: String { language == .simplifiedChinese ? "请按下按键…" : "Press keys…" }
     var cancel: String { language == .simplifiedChinese ? "取消" : "Cancel" }
@@ -213,5 +213,38 @@ struct CopyCoCopy: Sendable {
     }
     func shortcutUnavailable(_ shortcut: String) -> String {
         language == .simplifiedChinese ? "快捷键 \(shortcut) 不可用，请使用 CopyCo 菜单" : "Shortcut \(shortcut) is unavailable; use the CopyCo menu"
+    }
+
+    /// Shown while macOS Secure Event Input is active (typically a password field).
+    /// Carbon global hot keys are not delivered in that mode; the menu bar still works.
+    func secureInputShortcutUnavailable(hotKey: String) -> String {
+        language == .simplifiedChinese
+            ? "密码输入中：\(hotKey) 暂不可用。请点菜单栏图标打开历史，或离开密码框后再按快捷键"
+            : "Password field active: \(hotKey) is unavailable. Use the menu bar icon, or leave the field and press the shortcut again"
+    }
+
+    func secureInputShortcutRestored(hotKey: String) -> String {
+        language == .simplifiedChinese
+            ? "已离开密码框，\(hotKey) 可用"
+            : "Left password field — \(hotKey) is available again"
+    }
+
+    /// Guidance when content is ready but Secure Event Input still blocks the hot key.
+    func pendingPasteSecureInputHint() -> String {
+        language == .simplifiedChinese
+            ? "内容已就绪：当前在密码框中，全局快捷键不可用，请直接按 ⌘V 粘贴"
+            : "Content ready — password fields block the global shortcut; press ⌘V to paste"
+    }
+
+    var skippedConcealedClipboardItem: String {
+        language == .simplifiedChinese
+            ? "已跳过隐藏/临时剪贴板内容（例如密码管理器复制的密码）"
+            : "Skipped concealed/transient clipboard content (for example a password-manager secret)"
+    }
+
+    var skippedExcludedClipboardSource: String {
+        language == .simplifiedChinese
+            ? "已跳过来自排除应用或密码管理器的剪贴板内容"
+            : "Skipped clipboard content from an excluded app or password manager"
     }
 }

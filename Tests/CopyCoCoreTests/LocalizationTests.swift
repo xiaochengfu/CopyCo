@@ -52,11 +52,27 @@ final class LocalizationTests: XCTestCase {
         XCTAssertTrue(copy.pendingPasteReadyHint(hotKey: "⌥⌘C").contains("⌥⌘C"))
         XCTAssertTrue(copy.pendingPasteStillNeedsCursorHint(hotKey: "⌥⌘C").contains("光标"))
         XCTAssertTrue(copy.pendingPasteNoDestinationHint(hotKey: "⌥⌘C").contains("切换"))
+        XCTAssertTrue(copy.pendingPasteSecureInputHint().contains("⌘V"))
 
         let english = CopyCoCopy(language: .english)
         XCTAssertTrue(english.pendingPasteReadyHint(hotKey: "⌥⌘C").contains("⌥⌘C"))
         XCTAssertTrue(english.pendingPasteStillNeedsCursorHint(hotKey: "⌥⌘C").contains("No text cursor"))
         XCTAssertTrue(english.pendingPasteNoDestinationHint(hotKey: "⌥⌘C").contains("Switch"))
+        XCTAssertTrue(english.pendingPasteSecureInputHint().contains("⌘V"))
+    }
+
+    func testCopyContainsSecureInputAndPrivacySkipMessages() {
+        let chinese = CopyCoCopy(language: .simplifiedChinese)
+        XCTAssertTrue(chinese.secureInputShortcutUnavailable(hotKey: "⌥⌘C").contains("密码"))
+        XCTAssertTrue(chinese.secureInputShortcutRestored(hotKey: "⌥⌘C").contains("⌥⌘C"))
+        XCTAssertFalse(chinese.skippedConcealedClipboardItem.isEmpty)
+        XCTAssertFalse(chinese.skippedExcludedClipboardSource.isEmpty)
+
+        let english = CopyCoCopy(language: .english)
+        XCTAssertTrue(english.secureInputShortcutUnavailable(hotKey: "⌥⌘C").contains("Password"))
+        XCTAssertTrue(english.secureInputShortcutRestored(hotKey: "⌥⌘C").contains("⌥⌘C"))
+        XCTAssertTrue(english.skippedConcealedClipboardItem.lowercased().contains("concealed"))
+        XCTAssertTrue(english.skippedExcludedClipboardSource.lowercased().contains("password"))
     }
 
     func testEmptyHistoryDescriptionUsesConfiguredHotKey() {

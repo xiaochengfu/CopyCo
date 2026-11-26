@@ -43,21 +43,43 @@ public enum PrivacyFilter {
         "com.apple.keychainaccess"
     ]
 
-    public static func shouldRecord(change: PasteboardChange, settings: PrivacySettings) -> Bool {
-        guard !settings.isPaused else { return false }
+    public enum Decision: Sendable, Equatable {
+        case record
+        case skip(Reason)
+
+        public var shouldRecord: Bool {
+            if case .record = self { return true }
+            return false
+        }
+    }
+
+    public enum Reason: Sendable, Equatable {
+        case paused
+        case concealedOrTransient
+        case excludedSource
+    }
+
+    public static func decide(change: PasteboardChange, settings: PrivacySettings) -> Decision {
+        guard !settings.isPaused else { return .skip(.paused) }
 
         let normalizedTypes = Set(change.typeIdentifiers.map(normalized))
-        guard !normalizedTypes.contains(normalized(concealedTypeIdentifier)),
-              !normalizedTypes.contains(normalized(transientTypeIdentifier)) else {
-            return false
+        if normalizedTypes.contains(normalized(concealedTypeIdentifier))
+            || normalizedTypes.contains(normalized(transientTypeIdentifier)) {
+            return .skip(.concealedOrTransient)
         }
 
         if let sourceBundleID = change.sourceBundleID.map(normalized) {
             let excludedBundleIDs = Set((passwordManagerBundleIDs.union(settings.excludedBundleIDs)).map(normalized))
-            guard !excludedBundleIDs.contains(sourceBundleID) else { return false }
+            if excludedBundleIDs.contains(sourceBundleID) {
+                return .skip(.excludedSource)
+            }
         }
 
-        return true
+        return .record
+    }
+
+    public static func shouldRecord(change: PasteboardChange, settings: PrivacySettings) -> Bool {
+        decide(change: change, settings: settings).shouldRecord
     }
 
     private static func normalized(_ value: String) -> String {

@@ -65,6 +65,21 @@ public final class PasteboardCapture: @unchecked Sendable {
         }
     }
 
+    /// Fired when a pasteboard change is intentionally ignored for privacy
+    /// (concealed/transient marks or excluded / password-manager sources).
+    public var onPrivacySkip: @Sendable (PrivacyFilter.Reason) -> Void {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return privacySkipHandler
+        }
+        set {
+            lock.lock()
+            privacySkipHandler = newValue
+            lock.unlock()
+        }
+    }
+
     public var isPaused: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -106,6 +121,7 @@ public final class PasteboardCapture: @unchecked Sendable {
     private var privacySettings: PrivacySettings
     private var itemHandler: @Sendable (ClipboardItem) -> Void = { _ in }
     private var rejectionHandler: @Sendable (Rejection, String?) -> Void = { _, _ in }
+    private var privacySkipHandler: @Sendable (PrivacyFilter.Reason) -> Void = { _ in }
 
     public init(
         pasteboard: NSPasteboard = .general,
@@ -239,14 +255,14 @@ public final class PasteboardCapture: @unchecked Sendable {
         return Extraction(item: item, fingerprint: fingerprint, rejection: nil)
     }
 
-    static func shouldEmit(
+    static func privacyDecision(
         extraction: Extraction,
         typeIdentifiers: Set<String>,
         sourceBundleID: String?,
         settings: PrivacySettings
-    ) -> Bool {
-        guard let fingerprint = extraction.fingerprint else { return false }
-        return PrivacyFilter.shouldRecord(
+    ) -> PrivacyFilter.Decision? {
+        guard let fingerprint = extraction.fingerprint else { return nil }
+        return PrivacyFilter.decide(
             change: PasteboardChange(
                 typeIdentifiers: typeIdentifiers,
                 sourceBundleID: sourceBundleID,
@@ -254,6 +270,20 @@ public final class PasteboardCapture: @unchecked Sendable {
             ),
             settings: settings
         )
+    }
+
+    static func shouldEmit(
+        extraction: Extraction,
+        typeIdentifiers: Set<String>,
+        sourceBundleID: String?,
+        settings: PrivacySettings
+    ) -> Bool {
+        privacyDecision(
+            extraction: extraction,
+            typeIdentifiers: typeIdentifiers,
+            sourceBundleID: sourceBundleID,
+            settings: settings
+        )?.shouldRecord == true
     }
 
     static func shouldDeliver(
@@ -321,12 +351,32 @@ public final class PasteboardCapture: @unchecked Sendable {
             captureGeneration: generation,
             currentGeneration: captureGeneration,
             isRunning: timer != nil
-        ), Self.shouldEmit(
+        ) else {
+            lock.unlock()
+            return
+        }
+        let decision = Self.privacyDecision(
             extraction: extraction,
             typeIdentifiers: contents.typeIdentifiers,
             sourceBundleID: attribution.bundleID,
             settings: privacySettings
-        ) else {
+        )
+        guard let decision else {
+            lock.unlock()
+            return
+        }
+        guard decision.shouldRecord else {
+            let skipped = privacySkipHandler
+            inFlightCallbacks += 1
+            lock.unlock()
+            if case let .skip(reason) = decision {
+                skipped(reason)
+            }
+            lock.lock()
+            inFlightCallbacks -= 1
+            if inFlightCallbacks == 0 {
+                lock.broadcast()
+            }
             lock.unlock()
             return
         }

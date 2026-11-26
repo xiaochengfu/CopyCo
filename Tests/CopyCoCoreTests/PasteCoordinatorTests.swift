@@ -328,6 +328,28 @@ final class PasteCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testSecureTextFieldStyleFocusStillValidatesAsPasteDestination() throws {
+        // After FocusedElementTextInput treats AXSecureTextField as accepting
+        // text input, DestinationFocusSnapshot must keep validating so paste
+        // into password fields is not forced into the pending-paste loop.
+        let destination = try runningApplication()
+        let snapshot = DestinationFocusSnapshot(
+            workspaceApplication: destination,
+            workspacePID: destination.processIdentifier,
+            axPID: destination.processIdentifier,
+            acceptsTextInput: true
+        )
+
+        XCTAssertTrue(snapshot.validates(processIdentifier: destination.processIdentifier))
+        XCTAssertFalse(
+            HistoryPanelController.shouldBeginPendingPaste(
+                acceptsTextInput: true,
+                hasLiveDestination: true
+            )
+        )
+    }
+
+    @MainActor
     func testWithoutAccessibilityRestoresClipboardAndReturnsCopyOnly() async throws {
         let rootURL = try makeTemporaryDirectory()
         let pasteboard = NSPasteboard(name: .init("CopyCoPasteTests-\(UUID().uuidString)"))
